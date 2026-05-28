@@ -1,0 +1,29 @@
+{
+  "name": "reacher-usage",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "devvit playtest",
+    "login": "devvit login",
+    "whoami": "devvit whoami",
+    "upload": "devvit upload",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@devvit/start": "0.12.23",
+    "@devvit/public-api": "0.12.23",
+    "@devvit/web": "0.12.23",
+    "@hono/node-server": "2.0.2",
+    "devvit": "0.12.23",
+    "hono": "4.12.18",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "25.0.0",
+    "typescript": "6.0.3",
+    "vite": "8.0.12"
+  },
+  "license": "BSD-3-Clause"
+}

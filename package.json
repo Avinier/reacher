@@ -1,0 +1,23 @@
+{
+  "name": "reacher",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "lint": "pnpm --filter web lint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx apps/web/db/migrate.ts",
+    "runner:once": "cd apps/runner && uv run python -m reacher_runner.main --once",
+    "reddit:build": "pnpm --filter reacher-usage build",
+    "reddit:upload": "pnpm --filter reacher-usage upload",
+    "reddit:dev": "pnpm --filter reacher-usage dev",
+    "reddit:whoami": "pnpm --filter reacher-usage whoami"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.4",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

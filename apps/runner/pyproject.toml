@@ -1,0 +1,19 @@
+[project]
+name = "reacher-runner"
+version = "0.1.0"
+description = "Local Python ADK runner for Reacher browser-agent jobs"
+requires-python = ">=3.12"
+dependencies = [
+  "google-adk>=1.34.1",
+  "httpx>=0.28.1",
+  "python-dotenv>=1.1.0"
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
