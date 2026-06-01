@@ -80,6 +80,24 @@ class GeminiResearchClient:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
 
+    def plan_reddit_queries(self, prompt: str) -> GeminiResult:
+        planning_prompt = (
+            "Return JSON only. Break this research request into concise Reddit search queries. "
+            "Do not copy the full prompt into a query. Each query must be under 80 characters, specific, "
+            "and optimized for Reddit's search.json endpoint. Prefer quoted phrases for exact matches, "
+            "combine key terms rather than full sentences, and think about what Reddit users actually title "
+            "their posts. Also suggest relevant subreddits to search in. "
+            "Schema: {\"interpreted_goal\":\"\",\"queries\":[\"short search query\"],\"subreddits\":[\"subredditname\"]}. "
+            f"Research request: {prompt}"
+        )
+        api_result = self._try_genai_api(planning_prompt)
+        if api_result.ok:
+            return api_result
+        cli_result = self._try_gemini_cli(planning_prompt)
+        if cli_result.ok:
+            return cli_result
+        return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
+
     def aggregate_browserbase_research(self, prompt: str, pages: list[dict[str, Any]], max_targets: int = 50) -> GeminiResult:
         page_payload = [
             {

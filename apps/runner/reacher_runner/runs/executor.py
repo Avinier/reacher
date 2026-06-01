@@ -25,6 +25,15 @@ class RunExecutor:
 
         if run["kind"] == "research":
             ResearchAgent(self.db, self.config.data_dir, self.skills_root, self.config).run(run)
+            health = self._research_health(run["id"])
+            if health["targets"] == 0 and health["failed_steps"] > 0:
+                self.db.mark_run(
+                    run["id"],
+                    "failed",
+                    result_summary="Research finished with no targets because one or more discovery paths failed.",
+                    error_message="No targets were saved; inspect failed timeline steps for provider errors.",
+                )
+                return
             self.db.mark_run(run["id"], "completed", result_summary="Research completed with saved filters, targets, evidence, drafts, and exports.")
             return
 
@@ -49,3 +58,14 @@ class RunExecutor:
             return
 
         raise ValueError(f"Unsupported run kind: {run['kind']}")
+
+    def _research_health(self, run_id: str) -> dict[str, int]:
+        row = self.db.conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM targets WHERE run_id = ?) AS targets,
+                (SELECT COUNT(*) FROM run_steps WHERE run_id = ? AND status = 'failed') AS failed_steps
+            """,
+            (run_id, run_id),
+        ).fetchone()
+        return {"targets": int(row["targets"] if row else 0), "failed_steps": int(row["failed_steps"] if row else 0)}

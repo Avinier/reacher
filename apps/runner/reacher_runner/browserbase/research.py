@@ -4,6 +4,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from time import perf_counter
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -172,12 +173,23 @@ class BrowserbaseResearchClient:
                 "X-BB-API-Key": config.browserbase_api_key,
             },
         )
+        self._usage_events: list[UsageEvent] = []
+        self._usage_lock = Lock()
 
     def close(self) -> None:
         self.client.close()
 
     def record_usage(self, event: UsageEvent) -> None:
-        if self.usage_recorder:
+        with self._usage_lock:
+            self._usage_events.append(event)
+
+    def flush_usage(self) -> None:
+        if not self.usage_recorder:
+            return
+        with self._usage_lock:
+            events = list(self._usage_events)
+            self._usage_events.clear()
+        for event in events:
             self.usage_recorder(event)
 
     def research(
@@ -209,6 +221,7 @@ class BrowserbaseResearchClient:
                     search_results.extend(future.result())
                 except Exception as error:  # noqa: BLE001 - persisted as run evidence
                     errors.append(f"search {spec.platform} {spec.query}: {error}")
+        self.flush_usage()
 
         deduped_results: list[BrowserbaseSearchResult] = []
         seen_urls: set[str] = set()
@@ -231,6 +244,7 @@ class BrowserbaseResearchClient:
                     fetched_pages.append(future.result())
                 except Exception as error:  # noqa: BLE001
                     errors.append(f"fetch {result.url}: {error}")
+        self.flush_usage()
 
         rendered_count = 0
         for result in deduped_results:
@@ -246,6 +260,7 @@ class BrowserbaseResearchClient:
                 rendered_count += 1
             except Exception as error:  # noqa: BLE001
                 errors.append(f"browser render {result.platform} {result.url}: {error}")
+        self.flush_usage()
 
         return BrowserbaseDeepResearchResult(
             prompt=prompt,
