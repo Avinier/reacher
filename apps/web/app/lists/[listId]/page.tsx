@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { DeleteButton } from "@/components/delete-button";
 import { RunLauncher } from "@/components/run-launcher";
 import { getListDetail } from "@/lib/db/repositories";
 
@@ -15,6 +16,9 @@ export default async function ListDetailPage({ params }: { params: Promise<{ lis
           <p className="eyebrow">Saved List</p>
           <h1>{String(detail.list.name)}</h1>
           <p>{String(detail.list.description ?? "")}</p>
+          <div className="toolbar">
+            <DeleteButton apiPath={`/api/lists/${listId}`} confirmLabel={`Delete list ${String(detail.list.name)}? Targets remain saved but are removed from this list.`} redirectTo="/lists" />
+          </div>
         </div>
       </header>
       <div className="grid">

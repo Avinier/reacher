@@ -74,6 +74,29 @@ export const runSteps = sqliteTable(
   })
 );
 
+export const runUsageEvents = sqliteTable(
+  "run_usage_events",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    service: text("service").notNull(),
+    operation: text("operation").notNull(),
+    model: text("model"),
+    quantity: real("quantity").notNull(),
+    unit: text("unit").notNull(),
+    unitCostUsd: real("unit_cost_usd"),
+    estimatedCostUsd: real("estimated_cost_usd"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    totalTokens: integer("total_tokens"),
+    costBasis: text("cost_basis").notNull(),
+    metadataJson: text("metadata_json", { mode: "json" }),
+    createdAt: timestamps().createdAt
+  },
+  (table) => ({ runIdx: index("run_usage_events_run_id_idx").on(table.runId) })
+);
+
 export const browserContexts = sqliteTable(
   "browser_contexts",
   {

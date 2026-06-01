@@ -39,6 +39,17 @@ export function runMarkdown(runId: string) {
     `- Targets found: ${detail.targets.length}`,
     `- Filters found: ${detail.filters.length}`,
     `- Sources captured: ${detail.sources.length}`,
+    `- Estimated usage cost: $${Number(detail.usageSummary.estimated_cost_usd ?? 0).toFixed(4)}`,
+    `- Gemini/input tokens: ${Number(detail.usageSummary.input_tokens ?? 0).toLocaleString()}`,
+    `- Gemini/output tokens: ${Number(detail.usageSummary.output_tokens ?? 0).toLocaleString()}`,
+    "",
+    "## Usage",
+    "",
+    "| Provider | Service | Quantity | Unit | Tokens | Estimated cost |",
+    "|---|---|---:|---|---:|---:|",
+    detail.usageByProvider.map((usage) =>
+      `| ${usage.provider} | ${usage.service} | ${usage.quantity} | ${usage.unit} | ${usage.total_tokens ?? 0} | $${Number(usage.estimated_cost_usd ?? 0).toFixed(4)} |`
+    ).join("\n") || "| - | - | 0 | - | 0 | $0.0000 |",
     "",
     "## Targets",
     "",
@@ -59,6 +70,7 @@ export function runCsv(runId: string) {
     "role_or_context",
     "relevance_score",
     "why_relevant",
+    "estimated_run_cost_usd",
     "source_run_id"
   ];
   const rows = detail.targets.map((target, index) => [
@@ -72,6 +84,7 @@ export function runCsv(runId: string) {
     target.role_or_context,
     target.relevance_score,
     target.why_relevant,
+    detail.usageSummary.estimated_cost_usd,
     target.run_id
   ]);
   return [header, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
@@ -87,7 +100,10 @@ export function runJson(runId: string) {
       filters: detail.filters,
       sources: detail.sources,
       targets: detail.targets,
-      drafts: []
+      drafts: [],
+      usage_summary: detail.usageSummary,
+      usage_by_provider: detail.usageByProvider,
+      usage_events: detail.usage
     },
     null,
     2

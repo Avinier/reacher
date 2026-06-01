@@ -7,7 +7,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from reacher_runner.browserbase.research import BrowserbaseDeepResearchResult
+from reacher_runner.browserbase.yc import YCBatchResearchResult
 from reacher_runner.reddit import RedditResearchResult
+from reacher_runner.usage import UsageEvent
 
 
 def new_id(prefix: str) -> str:
@@ -23,9 +26,37 @@ class ReacherDb:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA busy_timeout = 5000")
+        self.ensure_runtime_tables()
 
     def close(self) -> None:
         self.conn.close()
+
+    def ensure_runtime_tables(self) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_usage_events (
+                    id text PRIMARY KEY NOT NULL,
+                    run_id text NOT NULL,
+                    provider text NOT NULL,
+                    service text NOT NULL,
+                    operation text NOT NULL,
+                    model text,
+                    quantity real NOT NULL,
+                    unit text NOT NULL,
+                    unit_cost_usd real,
+                    estimated_cost_usd real,
+                    input_tokens integer,
+                    output_tokens integer,
+                    total_tokens integer,
+                    cost_basis text NOT NULL,
+                    metadata_json text,
+                    created_at integer NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+                )
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS run_usage_events_run_id_idx ON run_usage_events (run_id)")
 
     def claim_next_run(self) -> sqlite3.Row | None:
         now = int(time.time() * 1000)
@@ -81,6 +112,75 @@ class ReacherDb:
                 ),
             )
         return step_id
+
+    def add_usage_event(self, run_id: str, event: UsageEvent) -> str:
+        event_id = new_id("usage")
+        now = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO run_usage_events
+                    (id, run_id, provider, service, operation, model, quantity, unit, unit_cost_usd, estimated_cost_usd,
+                     input_tokens, output_tokens, total_tokens, cost_basis, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    run_id,
+                    event.provider,
+                    event.service,
+                    event.operation,
+                    event.model,
+                    event.quantity,
+                    event.unit,
+                    event.unit_cost_usd,
+                    event.estimated_cost_usd,
+                    event.input_tokens,
+                    event.output_tokens,
+                    event.total_tokens,
+                    event.cost_basis,
+                    json.dumps(event.metadata) if event.metadata is not None else None,
+                    now,
+                ),
+            )
+        return event_id
+
+    def usage_summary(self, run_id: str) -> dict[str, Any]:
+        totals = self.conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
+            FROM run_usage_events WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        by_provider = self.conn.execute(
+            """
+            SELECT provider, service,
+                   COUNT(*) AS events,
+                   COALESCE(SUM(quantity), 0) AS quantity,
+                   unit,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens
+            FROM run_usage_events
+            WHERE run_id = ?
+            GROUP BY provider, service, unit
+            ORDER BY provider, service
+            """,
+            (run_id,),
+        ).fetchall()
+        return {
+            "estimated_cost_usd": float(totals["estimated_cost_usd"] if totals else 0),
+            "input_tokens": int(totals["input_tokens"] if totals else 0),
+            "output_tokens": int(totals["output_tokens"] if totals else 0),
+            "total_tokens": int(totals["total_tokens"] if totals else 0),
+            "by_provider": [dict(row) for row in by_provider],
+        }
 
     def settings(self, run: sqlite3.Row) -> dict[str, Any]:
         raw = run["settings_json"]
@@ -309,6 +409,322 @@ class ReacherDb:
             for error in result.errors:
                 self.conn.execute(
                     "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'Reddit fetch warning', ?, ?, ?)",
+                    (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
+                )
+
+        return list_id
+
+    def save_browserbase_research(self, run: sqlite3.Row, result: BrowserbaseDeepResearchResult) -> str:
+        now = int(time.time() * 1000)
+        run_id = run["id"]
+        list_id = new_id("list")
+        source_by_url: dict[str, str] = {}
+
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET interpreted_goal = ? WHERE id = ?",
+                ("Deep research across Browserbase Search, Fetch, and persisted browser contexts.", run_id),
+            )
+            self.conn.execute(
+                "INSERT INTO lists (id, name, description, source_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, f"Browserbase research: {result.prompt[:48]}", "Evidence from Browserbase Search, Fetch, and browser-session research.", run_id, now, now),
+            )
+
+            for platform in result.platforms:
+                self.conn.execute(
+                    "INSERT INTO research_filters (id, run_id, platform, kind, value, reason, confidence, created_at) VALUES (?, ?, ?, 'platform', ?, ?, ?, ?)",
+                    (new_id("filter"), run_id, platform, platform, "Selected platform for this deep research run.", 0.86, now),
+                )
+            for query in result.queries:
+                self.conn.execute(
+                    "INSERT INTO research_filters (id, run_id, platform, kind, value, reason, confidence, created_at) VALUES (?, ?, 'web', 'browserbase_search_query', ?, ?, ?, ?)",
+                    (new_id("filter"), run_id, query, "Browserbase Search query used for cheap discovery before Fetch or browser sessions.", 0.82, now),
+                )
+
+            rank = 1
+            for search_result in result.search_results:
+                source_id = new_id("source")
+                source_by_url[search_result.url] = source_id
+                summary_parts = [f"Browserbase Search query: {search_result.query}"]
+                if search_result.author:
+                    summary_parts.append(f"Author: {search_result.author}")
+                if search_result.published_date:
+                    summary_parts.append(f"Published: {search_result.published_date}")
+                self.conn.execute(
+                    "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, ?, 'search_result', ?, ?, ?, ?)",
+                    (source_id, run_id, search_result.platform, search_result.url, search_result.title, "; ".join(summary_parts), now),
+                )
+
+            if result.synthesized_targets:
+                for target in result.synthesized_targets:
+                    source_url = (target.source_urls[0] if target.source_urls else target.url) or target.url
+                    source_id = source_by_url.get(source_url) or source_by_url.get(target.url) or new_id("source")
+                    if source_url not in source_by_url and target.url not in source_by_url:
+                        source_by_url[source_url] = source_id
+                        self.conn.execute(
+                            "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, ?, 'llm_aggregated_source', ?, ?, ?, ?)",
+                            (source_id, run_id, target.platform, source_url, target.display_name, target.evidence_summary[:500], now),
+                        )
+                    target_id = new_id("target")
+                    metadata = {
+                        "source_method": "browserbase_llm_aggregated",
+                        "source_urls": target.source_urls,
+                        "outreach_angle": target.outreach_angle,
+                        **target.metadata,
+                    }
+                    self.conn.execute(
+                        "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                        (
+                            target_id,
+                            run_id,
+                            list_id,
+                            target.platform,
+                            target.target_type,
+                            target.display_name,
+                            None,
+                            target.url,
+                            target.role_or_context,
+                            target.relevance_score,
+                            target.why_relevant or "Matched the prompt through aggregated Browserbase evidence.",
+                            json.dumps(metadata),
+                            now,
+                            now,
+                        ),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (new_id("li"), list_id, target_id, rank, target.outreach_angle or "LLM-aggregated Browserbase target.", now),
+                    )
+                    rank += 1
+                    self.conn.execute(
+                        "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'llm_summary', ?, ?, ?, ?)",
+                        (new_id("ev"), target_id, source_id, target.evidence_summary or target.why_relevant, source_url, 0.82, now),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'dm', ?, ?, 'generated', ?, ?)",
+                        (
+                            new_id("draft"),
+                            target_id,
+                            run_id,
+                            target.platform,
+                            f"Hi, I found {target.display_name} while researching {result.prompt[:70]}. {target.outreach_angle or target.why_relevant[:180]}",
+                            target.evidence_summary,
+                            now,
+                            now,
+                        ),
+                    )
+
+            for page in [] if result.synthesized_targets else result.fetched_pages:
+                source_id = source_by_url.get(page.url) or new_id("source")
+                if page.url not in source_by_url:
+                    source_by_url[page.url] = source_id
+                    self.conn.execute(
+                        "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, ?, 'page', ?, ?, ?, ?)",
+                        (source_id, run_id, page.platform, page.url, page.title, f"Browserbase Fetch status {page.status_code}", now),
+                    )
+                evidence_text = page.content.strip()[:1200] or f"Fetched {page.url} with status {page.status_code}."
+                target_id = new_id("target")
+                target_type = "account" if page.platform in {"x", "linkedin"} else "page"
+                self.conn.execute(
+                    "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                    (
+                        target_id,
+                        run_id,
+                        list_id,
+                        page.platform,
+                        target_type,
+                        page.title[:120] or page.url,
+                        None,
+                        page.url,
+                        f"Browserbase Fetch content-type {page.content_type or 'unknown'}",
+                        0.72 if page.content else 0.56,
+                        "Matched the prompt through Browserbase Search and had retrievable page evidence.",
+                        json.dumps({"source_method": "browserbase_search_fetch", "status_code": page.status_code, "content_type": page.content_type}),
+                        now,
+                        now,
+                    ),
+                )
+                self.conn.execute(
+                    "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_id("li"), list_id, target_id, rank, "Browserbase Search/Fetch target.", now),
+                )
+                rank += 1
+                self.conn.execute(
+                    "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'page_fact', ?, ?, ?, ?)",
+                    (new_id("ev"), target_id, source_id, evidence_text, page.url, 0.76 if page.content else 0.52, now),
+                )
+                self.conn.execute(
+                    "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'dm', ?, ?, 'generated', ?, ?)",
+                    (
+                        new_id("draft"),
+                        target_id,
+                        run_id,
+                        page.platform,
+                        f"Hi, I found your work while researching {result.prompt[:90]}. The point that stood out was: {evidence_text[:180]}",
+                        f"Based on Browserbase-retrieved page evidence from {page.url}.",
+                        now,
+                        now,
+                    ),
+                )
+
+            for session in result.browser_sessions:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'completed', 'browser_session', ?, ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Opened Browserbase {session.platform} research session",
+                        f"Live view and recording: {session.live_url}",
+                        json.dumps(
+                            {
+                                "platform": session.platform,
+                                "providerSessionId": session.provider_session_id,
+                                "liveUrl": session.live_url,
+                                "recordingUrl": session.recording_url,
+                            }
+                        ),
+                        now,
+                        now,
+                    ),
+                )
+
+            for error in result.errors:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'Browserbase research warning', ?, ?, ?)",
+                    (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
+                )
+
+        return list_id
+
+    def save_yc_batch_research(self, run: sqlite3.Row, result: YCBatchResearchResult) -> str:
+        now = int(time.time() * 1000)
+        run_id = run["id"]
+        list_id = new_id("list")
+
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET interpreted_goal = ? WHERE id = ?",
+                (f"Collect the top {len(result.companies)} YC {result.batch_name} companies with founder/social clues and notes.", run_id),
+            )
+            self.conn.execute(
+                "INSERT INTO lists (id, name, description, source_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, f"YC {result.batch_name}: top {len(result.companies)} companies", "Browserbase-rendered YC company list enriched with founder/social clues and notes.", run_id, now, now),
+            )
+            self.conn.execute(
+                "INSERT INTO research_filters (id, run_id, platform, kind, value, reason, confidence, created_at) VALUES (?, ?, 'web', 'yc_batch', ?, ?, ?, ?)",
+                (new_id("filter"), run_id, result.batch_name, "Batch parsed from the user prompt.", 0.96, now),
+            )
+            self.conn.execute(
+                "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'web', 'page', ?, ?, ?, ?)",
+                (new_id("source"), run_id, result.directory_url, f"YC {result.batch_name} directory", "Rendered through Browserbase and scrolled until at least 30 company cards were available.", now),
+            )
+
+            self.conn.execute(
+                "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'completed', 'browser_session', ?, ?, ?, ?, ?)",
+                (
+                    new_id("step"),
+                    run_id,
+                    self.next_step_index(run_id),
+                    "Opened Browserbase YC directory research session",
+                    f"Live view and recording: {result.browser_session.live_url}",
+                    json.dumps({"providerSessionId": result.browser_session.provider_session_id, "liveUrl": result.browser_session.live_url}),
+                    now,
+                    now,
+                ),
+            )
+            if result.gemini_provider:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'completed', 'extract', 'Gemini notes enrichment completed', ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Used {result.gemini_provider} for concise company notes.",
+                        json.dumps({"provider": result.gemini_provider}),
+                        now,
+                        now,
+                    ),
+                )
+            elif result.gemini_error:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'extract', 'Gemini notes enrichment failed', ?, ?, ?)",
+                    (new_id("step"), run_id, self.next_step_index(run_id), result.gemini_error, now, now),
+                )
+
+            for company in result.companies:
+                source_id = new_id("source")
+                self.conn.execute(
+                    "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'web', 'profile', ?, ?, ?, ?)",
+                    (source_id, run_id, company.url, company.name, company.one_liner, now),
+                )
+                metadata = {
+                    "source_method": "browserbase_yc_batch_rendered",
+                    "rank": company.rank,
+                    "batch": company.batch,
+                    "website": company.website,
+                    "company_socials": company.company_socials,
+                    "founder_names": company.founder_names,
+                    "founder_social_results": [social.__dict__ for social in company.founder_social_results],
+                    "tags": company.tags,
+                    "team_size": company.team_size,
+                    "status": company.status,
+                }
+                target_id = new_id("target")
+                role = f"{company.batch}; {company.location or 'location unknown'}; team size {company.team_size or 'unknown'}"
+                note = company.note or company.one_liner or company.long_description[:220]
+                self.conn.execute(
+                    "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'web', 'company', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                    (
+                        target_id,
+                        run_id,
+                        list_id,
+                        company.name,
+                        company.slug,
+                        company.url,
+                        "Y Combinator",
+                        role,
+                        max(0.5, 1.0 - ((company.rank - 1) * 0.01)),
+                        note,
+                        json.dumps(metadata),
+                        now,
+                        now,
+                    ),
+                )
+                self.conn.execute(
+                    "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_id("li"), list_id, target_id, company.rank, note, now),
+                )
+                evidence = "\n".join(
+                    part
+                    for part in [
+                        company.one_liner,
+                        company.long_description[:700],
+                        f"Company socials: {json.dumps(company.company_socials)}" if company.company_socials else "",
+                        f"Founder/social clues: {json.dumps([social.__dict__ for social in company.founder_social_results], ensure_ascii=False)}" if company.founder_social_results else "",
+                    ]
+                    if part
+                )
+                self.conn.execute(
+                    "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'page_fact', ?, ?, ?, ?)",
+                    (new_id("ev"), target_id, source_id, evidence[:1400], company.url, 0.88, now),
+                )
+                self.conn.execute(
+                    "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, 'web', 'dm', ?, ?, 'generated', ?, ?)",
+                    (
+                        new_id("draft"),
+                        target_id,
+                        run_id,
+                        f"Hi {company.name} team, I was looking through YC {result.batch_name} companies and noticed: {note[:180]}",
+                        f"Based on YC profile, company socials, and Browserbase Search founder/social clues for {company.name}.",
+                        now,
+                        now,
+                    ),
+                )
+
+            for error in result.errors:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'YC batch research warning', ?, ?, ?)",
                     (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
                 )
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlite3 import connect
 
 from reacher_runner.db import ReacherDb
+from reacher_runner.usage import browserbase_search_event
 
 
 def apply_migration(db_path: Path) -> None:
@@ -60,5 +61,22 @@ def test_research_fixture_writes_core_entities(tmp_path: Path) -> None:
         assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_research'").fetchone()["count"] == 1
         assert db.conn.execute("SELECT COUNT(*) AS count FROM target_evidence").fetchone()["count"] == 1
         assert db.conn.execute("SELECT source_run_id FROM lists WHERE id = ?", (list_id,)).fetchone()["source_run_id"] == "run_research"
+    finally:
+        db.close()
+
+
+def test_usage_events_are_summarized(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        insert_run(db, "run_usage")
+
+        db.add_usage_event("run_usage", browserbase_search_event("yc w22", 5))
+        summary = db.usage_summary("run_usage")
+
+        assert summary["estimated_cost_usd"] > 0
+        assert summary["by_provider"][0]["provider"] == "browserbase"
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM run_usage_events WHERE run_id = 'run_usage'").fetchone()["count"] == 1
     finally:
         db.close()

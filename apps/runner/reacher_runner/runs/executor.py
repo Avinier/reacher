@@ -24,7 +24,7 @@ class RunExecutor:
         self.db.add_step(run["id"], "browser_session", "Browserbase smoke check", str(smoke["reason"]), output_json=smoke)
 
         if run["kind"] == "research":
-            ResearchAgent(self.db, self.config.data_dir, self.skills_root).run(run)
+            ResearchAgent(self.db, self.config.data_dir, self.skills_root, self.config).run(run)
             self.db.mark_run(run["id"], "completed", result_summary="Research completed with saved filters, targets, evidence, drafts, and exports.")
             return
 
@@ -39,7 +39,7 @@ class RunExecutor:
             return
 
         if run["kind"] == "export":
-            ResearchAgent(self.db, self.config.data_dir, self.skills_root).write_exports(run["id"])
+            ResearchAgent(self.db, self.config.data_dir, self.skills_root, self.config).write_exports(run["id"])
             self.db.mark_run(run["id"], "completed", result_summary="Exports regenerated.")
             return
 

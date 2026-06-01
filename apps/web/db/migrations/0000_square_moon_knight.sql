@@ -146,6 +146,27 @@ CREATE TABLE `run_steps` (
 );
 --> statement-breakpoint
 CREATE INDEX `run_steps_run_id_index_idx` ON `run_steps` (`run_id`,`index`);--> statement-breakpoint
+CREATE TABLE `run_usage_events` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`provider` text NOT NULL,
+	`service` text NOT NULL,
+	`operation` text NOT NULL,
+	`model` text,
+	`quantity` real NOT NULL,
+	`unit` text NOT NULL,
+	`unit_cost_usd` real,
+	`estimated_cost_usd` real,
+	`input_tokens` integer,
+	`output_tokens` integer,
+	`total_tokens` integer,
+	`cost_basis` text NOT NULL,
+	`metadata_json` text,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `run_usage_events_run_id_idx` ON `run_usage_events` (`run_id`);--> statement-breakpoint
 CREATE TABLE `runs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`kind` text NOT NULL,

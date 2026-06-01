@@ -15,6 +15,31 @@ function cleanRedditUsername(username: string) {
   return username.replace(/^\/?u\//i, "");
 }
 
+function ensureUsageEventsTable() {
+  getDb().exec(
+    `CREATE TABLE IF NOT EXISTS run_usage_events (
+      id text PRIMARY KEY NOT NULL,
+      run_id text NOT NULL,
+      provider text NOT NULL,
+      service text NOT NULL,
+      operation text NOT NULL,
+      model text,
+      quantity real NOT NULL,
+      unit text NOT NULL,
+      unit_cost_usd real,
+      estimated_cost_usd real,
+      input_tokens integer,
+      output_tokens integer,
+      total_tokens integer,
+      cost_basis text NOT NULL,
+      metadata_json text,
+      created_at integer NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+    );
+    CREATE INDEX IF NOT EXISTS run_usage_events_run_id_idx ON run_usage_events (run_id);`
+  );
+}
+
 export function ensureBrowserContexts() {
   const db = getDb();
   const now = Date.now();
@@ -139,10 +164,40 @@ export function getRun(runId: string) {
   return getDb().prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Row | undefined;
 }
 
+export function deleteRun(runId: string) {
+  const db = getDb();
+  const run = getRun(runId);
+  if (!run) return false;
+  db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+  return true;
+}
+
 export function getRunDetail(runId: string) {
+  ensureUsageEventsTable();
   return {
     run: getRun(runId),
     steps: getDb().prepare('SELECT * FROM run_steps WHERE run_id = ? ORDER BY "index"').all(runId) as Row[],
+    usage: getDb().prepare("SELECT * FROM run_usage_events WHERE run_id = ? ORDER BY created_at").all(runId) as Row[],
+    usageSummary: getDb().prepare(
+      `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+              COALESCE(SUM(input_tokens), 0) AS input_tokens,
+              COALESCE(SUM(output_tokens), 0) AS output_tokens,
+              COALESCE(SUM(total_tokens), 0) AS total_tokens
+       FROM run_usage_events WHERE run_id = ?`
+    ).get(runId) as Row,
+    usageByProvider: getDb().prepare(
+      `SELECT provider, service, unit,
+              COUNT(*) AS events,
+              COALESCE(SUM(quantity), 0) AS quantity,
+              COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+              COALESCE(SUM(input_tokens), 0) AS input_tokens,
+              COALESCE(SUM(output_tokens), 0) AS output_tokens,
+              COALESCE(SUM(total_tokens), 0) AS total_tokens
+       FROM run_usage_events
+       WHERE run_id = ?
+       GROUP BY provider, service, unit
+       ORDER BY provider, service`
+    ).all(runId) as Row[],
     filters: getDb().prepare("SELECT * FROM research_filters WHERE run_id = ? ORDER BY created_at").all(runId) as Row[],
     sources: getDb().prepare("SELECT * FROM sources WHERE run_id = ? ORDER BY captured_at").all(runId) as Row[],
     targets: getDb().prepare("SELECT * FROM targets WHERE run_id = ? ORDER BY relevance_score DESC, created_at").all(runId) as Row[],
@@ -167,6 +222,15 @@ export function getListDetail(listId: string) {
        WHERE list_items.list_id = ? ORDER BY list_items.rank`
     ).all(listId) as Row[]
   };
+}
+
+export function deleteList(listId: string) {
+  const db = getDb();
+  const list = db.prepare("SELECT * FROM lists WHERE id = ?").get(listId) as Row | undefined;
+  if (!list) return false;
+  db.prepare("UPDATE targets SET list_id = NULL WHERE list_id = ?").run(listId);
+  db.prepare("DELETE FROM lists WHERE id = ?").run(listId);
+  return true;
 }
 
 export function listTargets(limit = 100) {
