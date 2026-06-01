@@ -53,6 +53,83 @@ export function ensureBrowserContexts() {
   }
 }
 
+export function ensureIntegrationsTable() {
+  getDb().exec(
+    `CREATE TABLE IF NOT EXISTS integrations (
+      id text PRIMARY KEY NOT NULL,
+      provider text NOT NULL,
+      account_label text,
+      account_email text,
+      scopes text,
+      access_token text,
+      refresh_token text,
+      expires_at integer,
+      connected_at integer NOT NULL,
+      disconnected_at integer,
+      created_at integer NOT NULL,
+      updated_at integer
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS integrations_provider_idx ON integrations (provider);`
+  );
+}
+
+export function getGmailIntegration() {
+  ensureIntegrationsTable();
+  return getDb().prepare("SELECT * FROM integrations WHERE provider = 'gmail' AND disconnected_at IS NULL").get() as Row | undefined;
+}
+
+export function upsertGmailIntegration(input: {
+  accountLabel?: string | null;
+  accountEmail?: string | null;
+  scopes?: string | null;
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+}) {
+  ensureIntegrationsTable();
+  const db = getDb();
+  const now = Date.now();
+  const existing = db.prepare("SELECT * FROM integrations WHERE provider = 'gmail'").get() as Row | undefined;
+  const integrationId = existing?.id ? String(existing.id) : id("int");
+  db.prepare(
+    `INSERT INTO integrations
+      (id, provider, account_label, account_email, scopes, access_token, refresh_token, expires_at, connected_at, disconnected_at, created_at, updated_at)
+     VALUES (?, 'gmail', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+     ON CONFLICT(provider) DO UPDATE SET
+       account_label = excluded.account_label,
+       account_email = excluded.account_email,
+       scopes = excluded.scopes,
+       access_token = excluded.access_token,
+       refresh_token = COALESCE(excluded.refresh_token, integrations.refresh_token),
+       expires_at = excluded.expires_at,
+       connected_at = excluded.connected_at,
+       disconnected_at = NULL,
+       updated_at = excluded.updated_at`
+  ).run(
+    integrationId,
+    input.accountLabel ?? null,
+    input.accountEmail ?? null,
+    input.scopes ?? null,
+    input.accessToken ?? null,
+    input.refreshToken ?? null,
+    input.expiresAt ?? null,
+    now,
+    now,
+    now
+  );
+  return getGmailIntegration();
+}
+
+export function disconnectGmailIntegration() {
+  ensureIntegrationsTable();
+  const now = Date.now();
+  getDb().prepare(
+    `UPDATE integrations
+     SET access_token = NULL, refresh_token = NULL, expires_at = NULL, disconnected_at = ?, updated_at = ?
+     WHERE provider = 'gmail'`
+  ).run(now, now);
+}
+
 export function getBrowserContexts() {
   ensureBrowserContexts();
   return getDb().prepare("SELECT * FROM browser_contexts ORDER BY display_name").all() as Row[];

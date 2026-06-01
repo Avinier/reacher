@@ -1,19 +1,22 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createRun, createTargetResearchRun, deleteList, deleteRun, ensureBrowserContexts, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listTargetsByRun, queueRedditWriteAction } from "../lib/db/repositories";
+import { createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listTargetsByRun, queueRedditWriteAction, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
 
 function applyMigration(dbPath: string) {
   const db = new DatabaseSync(dbPath);
-  const migration = readFileSync(resolve(__dirname, "../../../apps/web/db/migrations/0000_square_moon_knight.sql"), "utf8");
-  for (const statement of migration.split("--> statement-breakpoint")) {
-    const sql = statement.trim();
-    if (sql) db.exec(sql);
+  const migrationsDir = resolve(__dirname, "../../../apps/web/db/migrations");
+  for (const file of readdirSync(migrationsDir).filter((name) => name.endsWith(".sql")).sort()) {
+    const migration = readFileSync(resolve(migrationsDir, file), "utf8");
+    for (const statement of migration.split("--> statement-breakpoint")) {
+      const sql = statement.trim();
+      if (sql) db.exec(sql);
+    }
   }
   db.close();
 }
@@ -134,5 +137,23 @@ describe("web SQLite repositories", () => {
     expect(actions).toHaveLength(1);
     expect(actions[0].action_type).toBe("submit_post");
     expect(actions[0].status).toBe("waiting_for_operator");
+  });
+
+  it("stores and disconnects Gmail OAuth integration state", () => {
+    upsertGmailIntegration({
+      accountLabel: "Avi",
+      accountEmail: "avi@example.com",
+      scopes: "openid email profile https://www.googleapis.com/auth/gmail.compose",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      expiresAt: Date.now() + 3600_000
+    });
+
+    const connected = getGmailIntegration();
+    expect(connected?.account_email).toBe("avi@example.com");
+    expect(connected?.refresh_token).toBe("refresh-token");
+
+    disconnectGmailIntegration();
+    expect(getGmailIntegration()).toBeUndefined();
   });
 });

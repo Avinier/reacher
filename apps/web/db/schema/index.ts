@@ -97,6 +97,27 @@ export const runUsageEvents = sqliteTable(
   (table) => ({ runIdx: index("run_usage_events_run_id_idx").on(table.runId) })
 );
 
+export const integrations = sqliteTable(
+  "integrations",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider", { enum: ["gmail"] }).notNull(),
+    accountLabel: text("account_label"),
+    accountEmail: text("account_email"),
+    scopes: text("scopes"),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
+    connectedAt: integer("connected_at", { mode: "timestamp_ms" }).notNull(),
+    disconnectedAt: integer("disconnected_at", { mode: "timestamp_ms" }),
+    createdAt: timestamps().createdAt,
+    updatedAt: timestamps().updatedAt
+  },
+  (table) => ({
+    providerIdx: uniqueIndex("integrations_provider_idx").on(table.provider)
+  })
+);
+
 export const browserContexts = sqliteTable(
   "browser_contexts",
   {

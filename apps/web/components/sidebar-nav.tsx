@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Archive, Bot, Home, ListChecks, MessageSquareText, Send, Settings, ShieldCheck, Target, type LucideIcon } from "lucide-react";
+import { Activity, Archive, Bot, Home, ListChecks, MessageSquareText, Settings, ShieldCheck, Target, type LucideIcon } from "lucide-react";
 
 type NavItem = {
   href: string;
@@ -30,7 +30,6 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     label: "Channels",
     items: [
       { href: "/outreach", label: "Outreach", icon: Bot },
-      { href: "/reddit", label: "Reddit", icon: Send },
       { href: "/contexts", label: "Contexts", icon: ShieldCheck }
     ]
   },
