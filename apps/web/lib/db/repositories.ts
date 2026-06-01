@@ -237,18 +237,25 @@ export function listTargets(limit = 100) {
   return getDb().prepare("SELECT * FROM targets ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
 }
 
-export function listTargetsByRun(limit = 200) {
+export function listTargetsByRun(limit = 50) {
   return getDb().prepare(
-    `SELECT targets.*,
-            runs.kind AS run_kind,
-            runs.status AS run_status,
-            runs.prompt AS run_prompt,
-            runs.created_at AS run_created_at,
-            runs.completed_at AS run_completed_at
-     FROM targets
-     JOIN runs ON runs.id = targets.run_id
-     ORDER BY runs.created_at DESC, COALESCE(targets.relevance_score, 0) DESC, targets.created_at DESC
-     LIMIT ?`
+    `WITH recent_runs AS (
+       SELECT runs.*
+       FROM runs
+       JOIN targets ON targets.run_id = runs.id
+       GROUP BY runs.id
+       ORDER BY runs.created_at DESC
+       LIMIT ?
+     )
+     SELECT targets.*,
+            recent_runs.kind AS run_kind,
+            recent_runs.status AS run_status,
+            recent_runs.prompt AS run_prompt,
+            recent_runs.created_at AS run_created_at,
+            recent_runs.completed_at AS run_completed_at
+     FROM recent_runs
+     JOIN targets ON targets.run_id = recent_runs.id
+     ORDER BY recent_runs.created_at DESC, COALESCE(targets.relevance_score, 0) DESC, targets.created_at DESC`
   ).all(limit) as Row[];
 }
 

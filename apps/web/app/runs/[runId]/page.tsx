@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { DeleteButton } from "@/components/delete-button";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
 import { getRunDetail } from "@/lib/db/repositories";
+import { formatDateTime, formatDuration, humanizeToken } from "@/lib/format";
 
 function money(value: unknown) {
   return `$${Number(value ?? 0).toFixed(4)}`;
@@ -13,7 +14,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const detail = getRunDetail(runId);
   if (!detail.run) notFound();
   const status = String(detail.run.status);
-  const isActive = status === "queued" || status === "claimed";
+  const isActive = status === "queued" || status === "claimed" || status === "running";
 
   return (
     <div className="page">
@@ -21,7 +22,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       <header className="page-header">
         <div>
           <p className="eyebrow">Run Detail</p>
-          <h1>{String(detail.run.kind).replaceAll("_", " ")} run</h1>
+          <h1>{humanizeToken(detail.run.kind)} run</h1>
           <p>{String(detail.run.prompt)}</p>
           <div className="toolbar">
             <DeleteButton apiPath={`/api/runs/${runId}`} confirmLabel={`Delete run ${runId}?`} redirectTo="/runs" />
@@ -42,6 +43,28 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </section>
       )}
       <div className="grid">
+        <section className="panel wide summary-strip">
+          <div>
+            <span className="summary-label">Queued</span>
+            <strong>{formatDateTime(detail.run.created_at)}</strong>
+          </div>
+          <div>
+            <span className="summary-label">Elapsed</span>
+            <strong>{formatDuration(detail.run.started_at, detail.run.completed_at)}</strong>
+          </div>
+          <div>
+            <span className="summary-label">Targets</span>
+            <strong>{detail.targets.length}</strong>
+          </div>
+          <div>
+            <span className="summary-label">Artifacts</span>
+            <strong>{detail.artifacts.length}</strong>
+          </div>
+          <div>
+            <span className="summary-label">Cost</span>
+            <strong>{money(detail.usageSummary.estimated_cost_usd)}</strong>
+          </div>
+        </section>
         <section className="panel">
           <h2>Timeline</h2>
           <div className="timeline">
@@ -82,7 +105,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </section>
         <section className="panel wide">
           <h2>Targets</h2>
-          <p className="muted">Relevance score is Reacher's ranking confidence for this run. Higher means the target is earlier in the saved list and has stronger prompt-matching evidence.</p>
+          <p className="muted">Relevance score is Reacher ranking confidence for this run. Higher means the target is earlier in the saved list and has stronger prompt-matching evidence.</p>
           <table className="table">
             <thead><tr><th>Name</th><th>Platform</th><th>Why</th><th>Relevance score</th></tr></thead>
             <tbody>

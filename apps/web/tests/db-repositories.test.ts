@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createRun, deleteList, deleteRun, ensureBrowserContexts, getRunDetail, listLists, listRedditActions, listRuns, queueRedditWriteAction } from "../lib/db/repositories";
+import { createRun, createTargetResearchRun, deleteList, deleteRun, ensureBrowserContexts, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listTargetsByRun, queueRedditWriteAction } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -78,6 +78,42 @@ describe("web SQLite repositories", () => {
     expect(deleteList("list_delete")).toBe(true);
     expect(listLists().some((list) => list.id === "list_delete")).toBe(false);
     expect(db.prepare("SELECT list_id FROM targets WHERE id = 'target_keep'").get()).toEqual({ list_id: null });
+  });
+
+  it("groups targets by recent source runs", () => {
+    const db = getDb();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_old', 'research', 'completed', 'Old run', 1000, 1000)").run();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_new', 'research', 'completed', 'New run', 2000, 2000)").run();
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, relevance_score, status, created_at, updated_at) VALUES ('target_old', 'run_old', 'web', 'person', 'Old Target', 0.9, 'new', 1100, 1100)").run();
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, relevance_score, status, created_at, updated_at) VALUES ('target_new_low', 'run_new', 'web', 'person', 'New Low', 0.2, 'new', 2100, 2100)").run();
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, relevance_score, status, created_at, updated_at) VALUES ('target_new_high', 'run_new', 'web', 'person', 'New High', 0.8, 'new', 2200, 2200)").run();
+
+    const grouped = listTargetsByRun(1);
+
+    expect(grouped.map((target) => target.id)).toEqual(["target_new_high", "target_new_low"]);
+    expect(grouped.every((target) => target.run_id === "run_new")).toBe(true);
+    expect(grouped[0].run_prompt).toBe("New run");
+  });
+
+  it("queues target-scoped research runs and surfaces them on target detail", () => {
+    const now = Date.now();
+    const db = getDb();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_source', 'research', 'completed', 'Find', ?, ?)").run(now, now);
+    db.prepare(
+      `INSERT INTO targets
+        (id, run_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, why_relevant, status, created_at, updated_at)
+       VALUES ('target_deep', 'run_source', 'linkedin', 'person', 'Deep Target', 'deep', 'https://example.com/deep', 'Example Org', 'Founder', 'Strong fit', 'new', ?, ?)`
+    ).run(now, now);
+
+    const runId = createTargetResearchRun("target_deep");
+    expect(runId).toBeTruthy();
+
+    const detail = getTargetDetail("target_deep");
+    expect(detail.researchRuns.map((run) => run.id)).toContain(runId);
+    const run = getRunDetail(String(runId)).run;
+    expect(run?.kind).toBe("research");
+    expect(String(run?.prompt)).toContain("Research further on Deep Target");
+    expect(JSON.parse(String(run?.settings_json))).toMatchObject({ targetIds: ["target_deep"] });
   });
 
   it("queues explicit Reddit write actions with a visible audit trail", () => {

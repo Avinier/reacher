@@ -73,12 +73,26 @@ textarea {
   font-weight: 760;
 }
 
-.sidebar nav {
+.sidebar-nav {
+  display: grid;
+  gap: 18px;
+}
+
+.nav-group {
   display: grid;
   gap: 4px;
 }
 
-.sidebar nav a {
+.nav-label {
+  margin: 0 0 4px;
+  padding: 0 10px;
+  color: var(--muted);
+  font: 760 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nav-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -90,9 +104,14 @@ textarea {
   font-weight: 650;
 }
 
-.sidebar nav a:hover {
+.nav-item:hover,
+.nav-item.active {
   background: var(--field);
   color: var(--ink);
+}
+
+.nav-item.active {
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .main {
@@ -334,6 +353,11 @@ textarea {
   align-items: center;
 }
 
+.stack-sm {
+  display: grid;
+  gap: 8px;
+}
+
 .link-list {
   display: grid;
   gap: 8px;
@@ -425,6 +449,28 @@ textarea {
   color: var(--muted);
 }
 
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.summary-strip > div {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  background: var(--panel);
+}
+
+.summary-label {
+  color: var(--muted);
+  font: 760 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -437,7 +483,7 @@ textarea {
     border-bottom: 1px solid var(--line);
   }
 
-  .sidebar nav {
+  .sidebar-nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -453,6 +499,10 @@ textarea {
   .section-heading,
   .run-history-item {
     flex-direction: column;
+  }
+
+  .summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .panel,
