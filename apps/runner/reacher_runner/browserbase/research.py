@@ -156,7 +156,7 @@ def build_research_queries(prompt: str, platforms: list[str], planned_queries: l
         add("discord", f"{topic} site:discord.com/invite OR site:discord.gg", "Discord community discovery.")
 
     add("web", topic, "Broad fallback query.")
-    return queries[:14]
+    return queries[:20]
 
 
 class BrowserbaseResearchClient:

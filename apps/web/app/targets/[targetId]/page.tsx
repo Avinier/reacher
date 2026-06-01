@@ -1,5 +1,9 @@
 import { notFound } from "next/navigation";
-import { getTargetDetail } from "@/lib/db/repositories";
+import { redirect } from "next/navigation";
+import { Search } from "lucide-react";
+import type React from "react";
+import { createTargetResearchRun, getTargetDetail } from "@/lib/db/repositories";
+import { formatDateTime, humanizeToken } from "@/lib/format";
 
 type SocialResult = {
   title?: string;
@@ -31,6 +35,14 @@ function evidenceText(text: unknown) {
   return String(text).split("\nCompany socials:")[0].split("\nFounder/social clues:")[0].trim();
 }
 
+async function researchFurther(formData: FormData) {
+  "use server";
+  const targetId = String(formData.get("targetId") ?? "");
+  const runId = createTargetResearchRun(targetId);
+  if (!runId) notFound();
+  redirect(`/runs/${runId}`);
+}
+
 export default async function TargetDetailPage({ params }: { params: Promise<{ targetId: string }> }) {
   const { targetId } = await params;
   const detail = getTargetDetail(targetId);
@@ -47,10 +59,45 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
           <p className="eyebrow">Target</p>
           <h1>{String(detail.target.display_name)}</h1>
           <p>{String(detail.target.why_relevant ?? "")}</p>
+          <p className="meta-line">
+            Found by <Linkish href={`/runs/${detail.target.run_id}`}>{humanizeToken(detail.target.run_kind)} run</Linkish>
+            {" "}on {formatDateTime(detail.target.run_created_at)}
+          </p>
         </div>
         <span className="status">{String(detail.target.status)}</span>
       </header>
       <div className="grid">
+        <section className="panel wide emphasis-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Research further</p>
+              <h2>Build a deeper person dossier from public sources.</h2>
+              <p>Queues a focused research run for role, company context, public activity, outreach angles, and source-backed facts.</p>
+            </div>
+            <form action={researchFurther}>
+              <input type="hidden" name="targetId" value={targetId} />
+              <button className="button" type="submit">
+                <Search size={16} />
+                Research further
+              </button>
+            </form>
+          </div>
+          {detail.researchRuns.length > 0 ? (
+            <div className="run-history">
+              {detail.researchRuns.map((run) => (
+                <a className="run-history-item" href={`/runs/${run.id}`} key={String(run.id)}>
+                  <span>
+                    <strong>{formatDateTime(run.created_at)}</strong>
+                    <small>{String(run.result_summary ?? run.prompt)}</small>
+                  </span>
+                  <span className={run.status === "failed" ? "status bad" : "status"}>{String(run.status)}</span>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">No deeper research runs have been queued for this target yet.</p>
+          )}
+        </section>
         <section className="panel">
           <h2>Company links</h2>
           {companySocials.length > 0 ? (
@@ -101,4 +148,8 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
       </div>
     </div>
   );
+}
+
+function Linkish({ href, children }: { href: string; children: React.ReactNode }) {
+  return <a className="external-link" href={href}>{children}</a>;
 }

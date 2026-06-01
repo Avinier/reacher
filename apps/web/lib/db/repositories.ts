@@ -237,13 +237,67 @@ export function listTargets(limit = 100) {
   return getDb().prepare("SELECT * FROM targets ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
 }
 
+export function listTargetsByRun(limit = 200) {
+  return getDb().prepare(
+    `SELECT targets.*,
+            runs.kind AS run_kind,
+            runs.status AS run_status,
+            runs.prompt AS run_prompt,
+            runs.created_at AS run_created_at,
+            runs.completed_at AS run_completed_at
+     FROM targets
+     JOIN runs ON runs.id = targets.run_id
+     ORDER BY runs.created_at DESC, COALESCE(targets.relevance_score, 0) DESC, targets.created_at DESC
+     LIMIT ?`
+  ).all(limit) as Row[];
+}
+
 export function getTargetDetail(targetId: string) {
   return {
-    target: getDb().prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row | undefined,
+    target: getDb().prepare(
+      `SELECT targets.*,
+              runs.kind AS run_kind,
+              runs.status AS run_status,
+              runs.prompt AS run_prompt,
+              runs.created_at AS run_created_at,
+              runs.completed_at AS run_completed_at
+       FROM targets
+       JOIN runs ON runs.id = targets.run_id
+       WHERE targets.id = ?`
+    ).get(targetId) as Row | undefined,
     evidence: getDb().prepare("SELECT * FROM target_evidence WHERE target_id = ? ORDER BY created_at DESC").all(targetId) as Row[],
     drafts: getDb().prepare("SELECT * FROM drafts WHERE target_id = ? ORDER BY created_at DESC").all(targetId) as Row[],
-    actions: getDb().prepare("SELECT * FROM outreach_actions WHERE target_id = ? ORDER BY created_at DESC").all(targetId) as Row[]
+    actions: getDb().prepare("SELECT * FROM outreach_actions WHERE target_id = ? ORDER BY created_at DESC").all(targetId) as Row[],
+    researchRuns: getDb().prepare(
+      `SELECT *
+       FROM runs
+       WHERE kind = 'research'
+         AND settings_json LIKE ?
+       ORDER BY created_at DESC`
+    ).all(`%"${targetId}"%`) as Row[]
   };
+}
+
+export function createTargetResearchRun(targetId: string) {
+  const target = getDb().prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row | undefined;
+  if (!target) return undefined;
+  const platform = String(target.platform) as Platform;
+  const platforms: Platform[] = platform === "web" ? ["web", "linkedin", "x", "reddit"] : ["web", platform];
+  const profileUrl = target.profile_url ? ` Profile URL: ${String(target.profile_url)}.` : "";
+  const handle = target.handle ? ` Handle: ${String(target.handle)}.` : "";
+  const organization = target.organization ? ` Organization: ${String(target.organization)}.` : "";
+  const role = target.role_or_context ? ` Role/context: ${String(target.role_or_context)}.` : "";
+  const prompt = [
+    `Research further on ${String(target.display_name)}.`,
+    "Find everything useful for outreach: current role, company, public projects, recent posts, communities, contact-relevant context, credibility signals, and concrete evidence with source URLs.",
+    `Original relevance note: ${String(target.why_relevant ?? "No note saved.")}`,
+    profileUrl,
+    handle,
+    organization,
+    role
+  ].join(" ").replace(/\s+/g, " ").trim();
+
+  return createRun({ kind: "research", prompt, platforms: Array.from(new Set(platforms)), targetIds: [targetId] });
 }
 
 export function listDrafts() {

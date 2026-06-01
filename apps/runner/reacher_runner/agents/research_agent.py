@@ -97,8 +97,10 @@ class ResearchAgent:
                         browserbase_platforms,
                         context_ids=context_ids,
                         planned_queries=plan.get("queries"),
+                        max_results_per_query=8,
+                        max_fetches=30,
                     )
-                    synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages)
+                    synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages, result.search_results)
                     if synthesized_targets:
                         result = replace(result, synthesized_targets=synthesized_targets)
                     list_id = self.db.save_browserbase_research(run, result)
@@ -207,10 +209,15 @@ class ResearchAgent:
             "interpreted_goal": interpreted_goal,
         }
 
-    def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages) -> list[BrowserbaseSynthesizedTarget]:
-        if not self.config or not pages:
+    def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages, search_results=None) -> list[BrowserbaseSynthesizedTarget]:
+        search_results = search_results or []
+        if not self.config or (not pages and not search_results):
             return []
-        gemini = GeminiResearchClient(self.config).aggregate_browserbase_research(prompt, [page.__dict__ for page in pages])
+        gemini = GeminiResearchClient(self.config).aggregate_browserbase_research(
+            prompt,
+            [page.__dict__ for page in pages],
+            [result.__dict__ for result in search_results],
+        )
         if gemini.usage_event:
             self.db.add_usage_event(run_id, gemini.usage_event)
         if not gemini.ok or not gemini.data:

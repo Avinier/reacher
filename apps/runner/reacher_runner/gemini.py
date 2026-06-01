@@ -98,7 +98,13 @@ class GeminiResearchClient:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
 
-    def aggregate_browserbase_research(self, prompt: str, pages: list[dict[str, Any]], max_targets: int = 50) -> GeminiResult:
+    def aggregate_browserbase_research(
+        self,
+        prompt: str,
+        pages: list[dict[str, Any]],
+        search_results: list[dict[str, Any]] | None = None,
+        max_targets: int = 50,
+    ) -> GeminiResult:
         page_payload = [
             {
                 "url": page.get("url"),
@@ -106,17 +112,33 @@ class GeminiResearchClient:
                 "platform": page.get("platform"),
                 "content": str(page.get("content") or "")[:1800],
             }
-            for page in pages[:18]
+            for page in pages[:30]
             if page.get("url")
         ]
+        search_payload = [
+            {
+                "url": result.get("url"),
+                "title": result.get("title"),
+                "platform": result.get("platform"),
+                "query": result.get("query"),
+                "author": result.get("author"),
+                "published_date": result.get("published_date"),
+            }
+            for result in (search_results or [])[:90]
+            if result.get("url")
+        ]
         aggregation_prompt = (
-            "Return JSON only. Synthesize the fetched research evidence into ranked outreach prospects or source targets. "
-            "Use the user's criteria. Prefer concrete people/companies over generic pages. Include only targets supported "
-            "by the provided evidence, and include source_urls. Scores must be 0.0 to 1.0. "
+            "Return JSON only. Synthesize the fetched page evidence and search-result metadata into ranked outreach prospects. "
+            "Use the user's criteria. Prefer concrete people/companies over generic pages. Fetched pages are stronger evidence; "
+            "search-result titles/URLs are acceptable lower-confidence evidence when they identify a concrete person, role, or company. "
+            "Do not invent names, companies, roles, stack signals, or pain signals not supported by either evidence set. "
+            "Include source_urls for every target. Scores must be 0.0 to 1.0. "
             "Schema: {\"summary\":\"\",\"targets\":[{\"display_name\":\"\",\"url\":\"\",\"platform\":\"web\",\"target_type\":\"person|company|page|account\","
             "\"role_or_context\":\"\",\"relevance_score\":0.0,\"why_relevant\":\"\",\"evidence_summary\":\"\",\"outreach_angle\":\"\",\"source_urls\":[\"\"],"
             "\"metadata\":{\"company\":\"\",\"role\":\"\",\"stack_signals\":[],\"pain_signals\":[],\"scores\":{\"icp_fit\":1,\"pain_evidence\":1,\"reachability\":1,\"call_likelihood\":1,\"design_partner\":1}}}]}. "
-            f"Return at most {max_targets} targets. User request: {prompt}. Evidence pages: {json.dumps(page_payload, ensure_ascii=False)}"
+            f"Return up to {max_targets} targets, and prefer breadth when there are many plausible search results. "
+            f"User request: {prompt}. Evidence pages: {json.dumps(page_payload, ensure_ascii=False)}. "
+            f"Search results: {json.dumps(search_payload, ensure_ascii=False)}"
         )
         api_result = self._try_genai_api(aggregation_prompt)
         if api_result.ok:

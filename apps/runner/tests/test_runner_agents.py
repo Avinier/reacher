@@ -86,6 +86,18 @@ def test_browserbase_query_builder_extracts_prompt_queries_without_full_prompt()
     assert not any("Research long target profile text" in query and "Pain signals" in query for query in values)
 
 
+def test_browserbase_query_builder_keeps_twenty_planned_queries() -> None:
+    planned = [
+        {"platform": "web", "query": f'"Founder CTO" AWS SaaS {index}', "reason": "coverage"}
+        for index in range(25)
+    ]
+
+    queries = build_research_queries("Find founder CTO prospects", ["web"], planned_queries=planned)
+
+    assert len(queries) == 20
+    assert queries[-1].query == '"Founder CTO" AWS SaaS 19'
+
+
 def test_reddit_research_sanitizes_planned_queries_and_subreddits() -> None:
     class StubRedditClient(RedditResearchClient):
         def __init__(self):
@@ -294,4 +306,75 @@ def test_browserbase_research_persistence_prefers_synthesized_targets(tmp_path: 
         assert "Founder-led" in target["why_relevant"]
         assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_syn'").fetchone()["count"] == 1
     finally:
+        db.close()
+
+
+def test_browserbase_aggregation_accepts_search_result_evidence(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    config = Config(
+        root=tmp_path,
+        database_path=db_path,
+        data_dir=tmp_path,
+        browserbase_api_key=None,
+        browserbase_project_id=None,
+        gemini_api_key=None,
+        google_agent_platform_api_key=None,
+        poll_interval_ms=1000,
+    )
+    db.conn.execute(
+        "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_test', 'research', 'claimed', 'Find SaaS CTOs', '{\"platforms\":[\"web\"]}', 1, 1)"
+    )
+    db.conn.commit()
+
+    class FakeGeminiClient:
+        def __init__(self, config):
+            self.config = config
+
+        def aggregate_browserbase_research(self, prompt, pages, search_results):
+            assert pages == []
+            assert search_results[0]["title"] == "Jane CTO at Acme"
+
+            class Result:
+                ok = True
+                provider = "fake"
+                usage_event = None
+                data = {
+                    "summary": "Search evidence produced a target.",
+                    "targets": [
+                        {
+                            "display_name": "Jane CTO",
+                            "url": "https://example.com/jane",
+                            "platform": "web",
+                            "target_type": "person",
+                            "role_or_context": "CTO at Acme",
+                            "relevance_score": 0.64,
+                            "why_relevant": "Search result identifies a SaaS CTO.",
+                            "evidence_summary": "Search title names Jane as CTO at Acme.",
+                            "outreach_angle": "Ask about post-deploy operations.",
+                            "source_urls": ["https://example.com/jane"],
+                        }
+                    ],
+                }
+
+            return Result()
+
+    try:
+        import reacher_runner.agents.research_agent as research_agent_module
+
+        original = research_agent_module.GeminiResearchClient
+        research_agent_module.GeminiResearchClient = FakeGeminiClient
+        agent = ResearchAgent(db, tmp_path, Path(__file__).resolve().parents[1] / "skills", config)
+        targets = agent._aggregate_browserbase_research(
+            "run_test",
+            "Find SaaS CTOs",
+            [],
+            [BrowserbaseSearchResult(query="CTO SaaS", title="Jane CTO at Acme", url="https://example.com/jane", platform="web")],
+        )
+
+        assert len(targets) == 1
+        assert targets[0].display_name == "Jane CTO"
+    finally:
+        research_agent_module.GeminiResearchClient = original
         db.close()
