@@ -1,6 +1,7 @@
-import { browserPlatforms, type BrowserPlatform, type GmailOutreachPayload, type Platform, type RedditWritePayload, type RunKind } from "@reacher/shared";
+import { browserPlatforms, type BrowserPlatform, type GmailOutreachPayload, type LinkedInOutreachPayload, type Platform, type RedditWritePayload, type RunKind } from "@reacher/shared";
 import { getDb, id } from "./client";
 import { gmailDraftForRecipient, parseGmailRecipients } from "../gmail/outreach";
+import { hasLinkedInUrl, linkedInDraftsForTarget } from "../linkedin/outreach";
 
 type Row = Record<string, unknown>;
 type SqlValue = string | number | bigint | null;
@@ -228,11 +229,11 @@ export function updateContext(platform: BrowserPlatform, fields: { status?: stri
   ).run(status, fields.providerContextId ?? null, fields.lastSessionId ?? null, fields.accountLabel ?? null, fields.lastError ?? null, verifiedAt ?? null, Date.now(), platform);
 }
 
-export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload }) {
+export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload; linkedinOutreach?: LinkedInOutreachPayload }) {
   const db = getDb();
   const runId = id("run");
   const now = Date.now();
-  const settings = { platforms: input.platforms, listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach };
+  const settings = { platforms: input.platforms, listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach, linkedinOutreach: input.linkedinOutreach };
   db.prepare(
     `INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at)
      VALUES (?, ?, 'queued', ?, ?, ?, ?)`
@@ -242,6 +243,89 @@ export function createRun(input: { kind: RunKind; prompt: string; platforms: Pla
      VALUES (?, ?, 0, 'completed', 'plan', 'Run queued', 'Waiting for the local runner to claim this job.', ?, ?)`
   ).run(id("step"), runId, now, now);
   return runId;
+}
+
+function selectedLinkedInTargets(input: { targetIds?: string[]; listIds?: string[] }) {
+  const db = getDb();
+  const selected = new Map<string, Row>();
+  for (const targetId of input.targetIds || []) {
+    const target = db.prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row | undefined;
+    if (target) selected.set(String(target.id), target);
+  }
+  for (const listId of input.listIds || []) {
+    const targets = db.prepare(
+      `SELECT targets.*
+       FROM list_items JOIN targets ON targets.id = list_items.target_id
+       WHERE list_items.list_id = ?
+       ORDER BY list_items.rank`
+    ).all(listId) as Row[];
+    for (const target of targets) selected.set(String(target.id), target);
+  }
+  return Array.from(selected.values());
+}
+
+export function createLinkedInOutreachRun(input: { prompt: string; linkedinOutreach: LinkedInOutreachPayload }) {
+  const db = getDb();
+  const now = Date.now();
+  const runId = id("run");
+  const targets = selectedLinkedInTargets(input.linkedinOutreach);
+  const valid = targets.filter((target) => hasLinkedInUrl(target.profile_url));
+  const skipped = targets.filter((target) => !hasLinkedInUrl(target.profile_url));
+  const settings = { platforms: ["linkedin"], linkedinOutreach: input.linkedinOutreach, skippedTargetIds: skipped.map((target) => target.id) };
+
+  db.prepare(
+    `INSERT INTO runs (id, kind, status, prompt, interpreted_goal, settings_json, result_summary, created_at, updated_at, started_at, completed_at)
+     VALUES (?, 'outreach_prepare', 'waiting_for_operator', ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    runId,
+    input.prompt,
+    "Prepare supervised LinkedIn outreach actions from selected saved targets and lists.",
+    JSON.stringify(settings),
+    `Prepared ${valid.length} LinkedIn target${valid.length === 1 ? "" : "s"} for review. Skipped ${skipped.length} without LinkedIn URLs.`,
+    now,
+    now,
+    now,
+    now
+  );
+  db.prepare(
+    `INSERT INTO run_steps (id, run_id, "index", status, kind, title, detail, input_json, output_json, started_at, completed_at)
+     VALUES (?, ?, 0, 'completed', 'plan', 'LinkedIn outreach queued', ?, ?, ?, ?, ?)`
+  ).run(id("step"), runId, `${valid.length} target(s) queued, ${skipped.length} skipped for missing LinkedIn URL.`, JSON.stringify(input.linkedinOutreach), JSON.stringify({ skipped: skipped.map((target) => target.id) }), now, now);
+
+  valid.forEach((target, index) => {
+    const targetId = String(target.id);
+    const profileUrl = String(target.profile_url);
+    const draft = linkedInDraftsForTarget(input.linkedinOutreach, {
+      id: targetId,
+      displayName: String(target.display_name),
+      company: target.organization ? String(target.organization) : undefined,
+      role: target.role_or_context ? String(target.role_or_context) : undefined,
+      headline: target.why_relevant ? String(target.why_relevant) : undefined,
+      notes: target.why_relevant ? String(target.why_relevant) : undefined,
+      linkedInUrl: profileUrl
+    });
+    const draftId = id("draft");
+    const actionId = id("act");
+    db.prepare(
+      `INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'linkedin', 'connection_note', ?, ?, 'generated', ?, ?)`
+    ).run(draftId, targetId, runId, JSON.stringify({ connectionNote: draft.connectionNote, dm: draft.dm }), `Deterministic LinkedIn connect-note-first draft. ${draft.snippet}`, now + index, now + index);
+    db.prepare(
+      `INSERT INTO outreach_actions (id, run_id, target_id, draft_id, platform, action_type, status, result_note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'linkedin', 'linkedin_prepare_connection_note', 'queued', ?, ?, ?)`
+    ).run(actionId, runId, targetId, draftId, JSON.stringify({ approved: false, profileUrl, stageType: "connect_note_first", connectionNote: draft.connectionNote, dm: draft.dm }), now + index, now + index);
+    db.prepare("UPDATE targets SET status = 'drafted', updated_at = ? WHERE id = ?").run(now + index, targetId);
+  });
+
+  skipped.forEach((target, index) => {
+    const targetId = String(target.id);
+    db.prepare(
+      `INSERT INTO outreach_actions (id, run_id, target_id, platform, action_type, status, result_note, created_at, updated_at)
+       VALUES (?, ?, ?, 'linkedin', 'linkedin_resolve_profile_skipped', 'failed', ?, ?, ?)`
+    ).run(id("act"), runId, targetId, JSON.stringify({ reason: "missing_linkedin_url" }), now + valid.length + index, now + valid.length + index);
+  });
+
+  return { runId, queued: valid.length, skipped: skipped.length };
 }
 
 export async function createGmailOutreachRun(input: { prompt: string; gmailOutreach: GmailOutreachPayload }) {
@@ -465,6 +549,42 @@ export function approveGmailDraft(actionId: string, approved: boolean) {
   return { actionId, approved };
 }
 
+export function approveLinkedInAction(actionId: string, approved: boolean) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'linkedin'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("LinkedIn outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), approved };
+  db.prepare("UPDATE outreach_actions SET result_note = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(note), now, actionId);
+  if (action.draft_id) {
+    db.prepare("UPDATE drafts SET status = ?, updated_at = ? WHERE id = ?").run(approved ? "approved_for_prepare" : "generated", now, String(action.draft_id));
+  }
+  return { actionId, approved };
+}
+
+export function recordLinkedInStaged(actionId: string, input: { providerSessionId: string; liveUrl?: string | null; browserSessionId?: string; startUrl: string }) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'linkedin'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("LinkedIn outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), providerSessionId: input.providerSessionId, liveUrl: input.liveUrl, browserSessionId: input.browserSessionId, startUrl: input.startUrl };
+  db.prepare("UPDATE outreach_actions SET status = 'waiting_for_operator', result_note = ?, browser_session_id = COALESCE(?, browser_session_id), updated_at = ? WHERE id = ?").run(JSON.stringify(note), input.browserSessionId ?? null, now, actionId);
+  if (action.draft_id) db.prepare("UPDATE drafts SET status = 'prepared', updated_at = ? WHERE id = ?").run(now, String(action.draft_id));
+  db.prepare("UPDATE targets SET status = 'prepared', updated_at = ? WHERE id = ?").run(now, String(action.target_id));
+  return { actionId, liveUrl: input.liveUrl };
+}
+
+export function recordLinkedInOperatorSent(actionId: string) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'linkedin'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("LinkedIn outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), operatorSentAt: now };
+  db.prepare("UPDATE outreach_actions SET action_type = 'linkedin_operator_sent', status = 'done', result_note = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(note), now, actionId);
+  db.prepare("UPDATE targets SET status = 'sent_by_user', updated_at = ? WHERE id = ?").run(now, String(action.target_id));
+  return { actionId, sentAt: now };
+}
+
 export function recordGmailDraftCreated(actionId: string, input: { gmailDraftId?: string; gmailMessageId?: string }) {
   const db = getDb();
   const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'email'").get(actionId) as Row | undefined;
@@ -500,6 +620,15 @@ export function listLists() {
      FROM lists LEFT JOIN list_items ON lists.id = list_items.list_id
      GROUP BY lists.id ORDER BY lists.created_at DESC`
   ).all() as Row[];
+}
+
+export function listOutreachTargetOptions(limit = 100) {
+  return getDb().prepare(
+    `SELECT id, display_name, platform, profile_url, organization
+     FROM targets
+     ORDER BY updated_at DESC, created_at DESC
+     LIMIT ?`
+  ).all(limit) as Row[];
 }
 
 export function getListDetail(listId: string) {

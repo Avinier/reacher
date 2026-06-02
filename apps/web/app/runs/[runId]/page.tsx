@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DeleteButton } from "@/components/delete-button";
 import { GmailOutreachActions, GmailRowActions, type GmailActionInput } from "@/components/gmail-outreach-actions";
+import { LinkedInRowActions, type LinkedInActionInput } from "@/components/linkedin-outreach-actions";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
 import { getRunDetail } from "@/lib/db/repositories";
 import { formatDateTime, formatDuration, humanizeToken } from "@/lib/format";
@@ -35,6 +36,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const status = String(detail.run.status);
   const isActive = status === "queued" || status === "claimed" || status === "running";
   const isGmailOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "email");
+  const isLinkedInOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "linkedin");
   const gmailActions: GmailActionInput[] = detail.actions.filter((action) => action.platform === "email").map((action) => {
     const note = parseJson(action.result_note);
     const draft = parseDraft(action.body);
@@ -48,7 +50,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       gmailDraftId: note.gmailDraftId ? String(note.gmailDraftId) : undefined
     };
   });
-
   return (
     <div className="page">
       <RunAutoRefresh active={isActive} />
@@ -141,6 +142,48 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                       <td><pre className="draft-preview">{rowAction.body}</pre></td>
                       <td><span className={action.status === "done" ? "status" : "status active"}>{String(action.status)}</span></td>
                       <td><GmailRowActions action={rowAction} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        )}
+        {isLinkedInOutreach && (
+          <section className="panel wide">
+            <div className="section-heading">
+              <div>
+                <h2>LinkedIn outreach review</h2>
+                <p className="muted">Approve rows, stage a logged-in Browserbase session, then manually send or connect in LinkedIn. Reacher never clicks final send.</p>
+              </div>
+            </div>
+            <table className="table">
+              <thead><tr><th>Target</th><th>Connection note</th><th>DM</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody>
+                {detail.actions.filter((action) => action.platform === "linkedin").map((action) => {
+                  const note = parseJson(action.result_note);
+                  const draft = parseJson(action.body);
+                  const rowAction: LinkedInActionInput = {
+                    actionId: String(action.id),
+                    runId,
+                    profileUrl: String(note.profileUrl ?? ""),
+                    connectionNote: String(note.connectionNote ?? draft.connectionNote ?? ""),
+                    dm: String(note.dm ?? draft.dm ?? ""),
+                    approved: Boolean(note.approved),
+                    status: String(action.status),
+                    liveUrl: note.liveUrl ? String(note.liveUrl) : undefined
+                  };
+                  return (
+                    <tr key={String(action.id)}>
+                      <td>
+                        <Link href={`/targets/${action.target_id}`}>{String(action.display_name)}</Link>
+                        <br />
+                        {rowAction.profileUrl ? <a className="external-link" href={rowAction.profileUrl} target="_blank" rel="noreferrer">{rowAction.profileUrl}</a> : <span className="muted">{String(note.reason ?? "missing_linkedin_url")}</span>}
+                      </td>
+                      <td><pre className="draft-preview">{rowAction.connectionNote}</pre></td>
+                      <td><pre className="draft-preview">{rowAction.dm}</pre></td>
+                      <td><span className={action.status === "failed" ? "status bad" : action.status === "done" ? "status" : "status active"}>{String(action.status)}</span></td>
+                      <td><LinkedInRowActions action={rowAction} /></td>
                     </tr>
                   );
                 })}

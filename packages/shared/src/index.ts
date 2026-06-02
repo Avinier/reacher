@@ -28,6 +28,7 @@ export type RunSettings = {
   targetIds?: string[];
   includeDrafts?: boolean;
   gmailOutreach?: GmailOutreachPayload;
+  linkedinOutreach?: LinkedInOutreachPayload;
 };
 
 export type ExportPayload = {
@@ -76,4 +77,12 @@ export type GmailOutreachPayload = {
   recipientsRaw: string;
   subject?: string;
   body?: string;
+};
+
+export type LinkedInOutreachPayload = {
+  targetIds?: string[];
+  listIds?: string[];
+  connectionTemplate: string;
+  dmTemplate: string;
+  mode: "connect_note_first";
 };

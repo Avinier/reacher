@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { RunLauncher } from "@/components/run-launcher";
 import { RunTable } from "@/components/tables";
-import { getBrowserContexts, listLists, listRuns } from "@/lib/db/repositories";
+import { getBrowserContexts, listLists, listOutreachTargetOptions, listRuns } from "@/lib/db/repositories";
 
 export default function HomePage() {
   const contexts = getBrowserContexts();
   const runs = listRuns(6);
   const lists = listLists();
+  const outreachTargets = listOutreachTargetOptions(80);
 
   return (
     <div className="page">
@@ -17,7 +18,10 @@ export default function HomePage() {
         </div>
       </header>
       <div className="grid">
-        <RunLauncher />
+        <RunLauncher
+          outreachLists={lists.map((list) => ({ id: String(list.id), name: String(list.name), targetCount: Number(list.target_count ?? 0) }))}
+          outreachTargets={outreachTargets.map((target) => ({ id: String(target.id), name: String(target.display_name), platform: String(target.platform), profileUrl: target.profile_url ? String(target.profile_url) : undefined, organization: target.organization ? String(target.organization) : undefined }))}
+        />
         <section className="panel third">
           <h2>Contexts</h2>
           {contexts.map((context) => (

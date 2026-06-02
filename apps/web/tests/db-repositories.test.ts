@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createGmailOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, upsertGmailIntegration } from "../lib/db/repositories";
+import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -158,6 +158,47 @@ describe("web SQLite repositories", () => {
     expect(String(detail.drafts[0].body)).toContain("Quick note for Example Co");
     expect(detail.actions[0].action_type).toBe("create_gmail_draft");
     expect(listRunsByMode("outreach", 10).map((run) => run.id)).toContain(result.runId);
+  });
+
+  it("creates supervised LinkedIn outreach runs and skips missing profile URLs", () => {
+    const now = Date.now();
+    const db = getDb();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_li_source', 'research', 'completed', 'Find', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO lists (id, name, source_run_id, created_at, updated_at) VALUES ('list_li', 'LinkedIn list', 'run_li_source', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, profile_url, organization, role_or_context, why_relevant, status, created_at, updated_at) VALUES ('target_li_ready', 'run_li_source', 'list_li', 'linkedin', 'person', 'Ada Ready', 'https://www.linkedin.com/in/ada-ready/', 'Acme', 'Founder', 'Works on agents', 'saved', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, organization, status, created_at, updated_at) VALUES ('target_li_missing', 'run_li_source', 'list_li', 'web', 'person', 'Missing Profile', 'Beta', 'saved', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO list_items (id, list_id, target_id, rank, created_at) VALUES ('li_1', 'list_li', 'target_li_ready', 1, ?)").run(now);
+    db.prepare("INSERT INTO list_items (id, list_id, target_id, rank, created_at) VALUES ('li_2', 'list_li', 'target_li_missing', 2, ?)").run(now);
+
+    const result = createLinkedInOutreachRun({
+      prompt: "Prepare LinkedIn outreach",
+      linkedinOutreach: {
+        mode: "connect_note_first",
+        listIds: ["list_li"],
+        connectionTemplate: "Hi {{name}}, {{notes}}. Would be good to connect.",
+        dmTemplate: "Hi {{name}},\n\n{{notes}}. Compare notes?"
+      }
+    });
+
+    expect(result).toMatchObject({ queued: 1, skipped: 1 });
+    const detail = getRunDetail(result.runId);
+    expect(detail.run?.kind).toBe("outreach_prepare");
+    expect(detail.drafts).toHaveLength(1);
+    expect(detail.actions.map((action) => action.action_type).sort()).toEqual(["linkedin_prepare_connection_note", "linkedin_resolve_profile_skipped"].sort());
+  });
+
+  it("records LinkedIn approval, staging, and operator sent state", () => {
+    const now = Date.now();
+    const db = getDb();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_li_action', 'outreach_prepare', 'waiting_for_operator', 'LI', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, profile_url, status, created_at, updated_at) VALUES ('target_li_action', 'run_li_action', 'linkedin', 'person', 'Ada Action', 'https://www.linkedin.com/in/ada-action/', 'drafted', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, status, created_at, updated_at) VALUES ('draft_li_action', 'target_li_action', 'run_li_action', 'linkedin', 'connection_note', '{}', 'generated', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO outreach_actions (id, run_id, target_id, draft_id, platform, action_type, status, result_note, created_at, updated_at) VALUES ('act_li_action', 'run_li_action', 'target_li_action', 'draft_li_action', 'linkedin', 'linkedin_prepare_connection_note', 'queued', '{\"profileUrl\":\"https://www.linkedin.com/in/ada-action/\"}', ?, ?)").run(now, now);
+
+    expect(approveLinkedInAction("act_li_action", true)).toMatchObject({ approved: true });
+    expect(recordLinkedInStaged("act_li_action", { providerSessionId: "session_1", liveUrl: "https://browserbase.com/sessions/session_1", startUrl: "https://www.linkedin.com/in/ada-action/" })).toMatchObject({ liveUrl: "https://browserbase.com/sessions/session_1" });
+    expect(recordLinkedInOperatorSent("act_li_action")).toMatchObject({ actionId: "act_li_action" });
+    expect(getDb().prepare("SELECT status FROM targets WHERE id = 'target_li_action'").get()).toEqual({ status: "sent_by_user" });
   });
 
   it("stores and disconnects Gmail OAuth integration state", () => {

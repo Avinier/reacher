@@ -1,8 +1,9 @@
 import { RunLauncher } from "@/components/run-launcher";
-import { listLists } from "@/lib/db/repositories";
+import { listLists, listOutreachTargetOptions } from "@/lib/db/repositories";
 
 export default function OutreachPage() {
   const lists = listLists();
+  const outreachTargets = listOutreachTargetOptions(120);
   return (
     <div className="page">
       <header className="page-header">
@@ -24,7 +25,11 @@ export default function OutreachPage() {
         </section>
         <section className="panel wide">
           <h2>Queue an outreach run</h2>
-          <RunLauncher compact />
+          <RunLauncher
+            compact
+            outreachLists={lists.map((list) => ({ id: String(list.id), name: String(list.name), targetCount: Number(list.target_count ?? 0) }))}
+            outreachTargets={outreachTargets.map((target) => ({ id: String(target.id), name: String(target.display_name), platform: String(target.platform), profileUrl: target.profile_url ? String(target.profile_url) : undefined, organization: target.organization ? String(target.organization) : undefined }))}
+          />
         </section>
       </div>
     </div>

@@ -86,3 +86,40 @@ export async function verifyContext(platform: BrowserPlatform) {
     missing: config.missing
   };
 }
+
+export async function openLinkedInOutreachSession(input: { runId: string; profileUrl: string }) {
+  const config = validateBrowserbaseConfig();
+  if (!config.ok) {
+    throw new Error(`Browserbase credentials missing: ${config.missing.join(", ")}`);
+  }
+  const context = getBrowserContext("linkedin");
+  if (!context?.provider_context_id || context.status !== "ready") {
+    throw new Error("LinkedIn Browserbase context must be ready before staging outreach.");
+  }
+
+  const { Browserbase } = await import("@browserbasehq/sdk");
+  const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+  const session = await bb.sessions.create({
+    projectId: process.env.BROWSERBASE_PROJECT_ID!,
+    browserSettings: {
+      context: {
+        id: String(context.provider_context_id),
+        persist: true
+      }
+    },
+    userMetadata: {
+      app: "reacher",
+      runId: input.runId,
+      platform: "linkedin",
+      purpose: "outreach-stage",
+      profileUrl: input.profileUrl
+    }
+  });
+
+  return {
+    providerSessionId: session.id,
+    liveUrl: `https://browserbase.com/sessions/${session.id}`,
+    startUrl: input.profileUrl,
+    browserContextId: String(context.id)
+  };
+}
