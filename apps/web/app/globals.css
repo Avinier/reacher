@@ -547,7 +547,7 @@ textarea {
 
 .summary-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 1px;
   padding: 0;
   overflow: hidden;
@@ -565,6 +565,22 @@ textarea {
   color: var(--muted);
   font: 760 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
   text-transform: uppercase;
+}
+
+.score-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.score-grid span {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  background: var(--field);
 }
 
 @media (max-width: 860px) {

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 import time
+from hashlib import sha1
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote_plus
 
 import httpx
@@ -92,7 +93,11 @@ class RedditResearchClient:
     _REQUEST_GAP = 1.2  # seconds between requests (Reddit wants ~1/sec for unauthed)
     _MAX_RETRIES = 3
 
-    def __init__(self, user_agent: str = "Reacher local research by u/_AVINIER"):
+    def __init__(
+        self,
+        user_agent: str = "Reacher local research by u/_AVINIER",
+        browserbase: "RedditBrowserbaseFallback | None" = None,
+    ):
         self.client = httpx.Client(
             timeout=20,
             follow_redirects=True,
@@ -102,6 +107,7 @@ class RedditResearchClient:
             },
         )
         self._last_request_at: float = 0.0
+        self.browserbase = browserbase
 
     def close(self) -> None:
         self.client.close()
@@ -184,8 +190,84 @@ class RedditResearchClient:
             except Exception as error:  # noqa: BLE001
                 errors.append(f"comments for {post.id}: {error}")
 
+        if not deduped_posts and self._should_use_browserbase_fallback(errors):
+            fallback = self._browserbase_fallback(queries, subreddits, limit=limit)
+            posts.extend(fallback.posts)
+            errors.extend(fallback.errors)
+
+            deduped_posts = []
+            seen_posts = set()
+            for post in posts:
+                if post.id in seen_posts:
+                    continue
+                deduped_posts.append(post)
+                seen_posts.add(post.id)
+
         display_query = "; ".join(queries) if planned_queries else queries[0]
         return RedditResearchResult(query=display_query, subreddits=subreddits, posts=deduped_posts[:limit], comments=comments, errors=errors)
+
+    def _should_use_browserbase_fallback(self, errors: list[str]) -> bool:
+        if not getattr(self, "browserbase", None):
+            return False
+        return any("appears blocked" in error.lower() or "403" in error for error in errors)
+
+    def _browserbase_fallback(self, queries: list[str], subreddits: list[str], limit: int) -> RedditResearchResult:
+        errors: list[str] = ["Direct Reddit JSON was blocked; using Browserbase Search fallback for public Reddit results."]
+        posts: list[RedditPost] = []
+        search_targets = subreddits or [""]
+
+        for query in queries[:5]:
+            for subreddit in search_targets[:5]:
+                if len(posts) >= limit:
+                    break
+                browser_query = self._browserbase_query(query, subreddit)
+                try:
+                    results = self.browserbase.search_web(browser_query, platform="reddit", num_results=min(limit, 8))
+                except Exception as error:  # noqa: BLE001 - persist provider fallback failures
+                    errors.append(f"browserbase reddit search [{browser_query[:60]}]: {error}")
+                    continue
+
+                for result in results:
+                    post = self._post_from_browserbase_result(query, result)
+                    if post:
+                        posts.append(post)
+                        if len(posts) >= limit:
+                            break
+            if len(posts) >= limit:
+                break
+
+        if not posts:
+            errors.append("Browserbase Reddit fallback returned no usable reddit.com post results.")
+        return RedditResearchResult(query="; ".join(queries), subreddits=subreddits, posts=posts[:limit], errors=errors)
+
+    def _browserbase_query(self, query: str, subreddit: str) -> str:
+        if subreddit:
+            return f"site:reddit.com/r/{subreddit} {query}"
+        return f"site:reddit.com/r/ {query}"
+
+    def _post_from_browserbase_result(self, query: str, result: "BrowserbaseRedditSearchResult") -> RedditPost | None:
+        url = str(getattr(result, "url", "") or "")
+        title = str(getattr(result, "title", "") or url)
+        if "reddit.com/" not in url:
+            return None
+        subreddit = _subreddit_from_url(url)
+        if not subreddit:
+            return None
+        permalink = _canonical_reddit_url(url)
+        summary = str(getattr(result, "summary", "") or "")
+        post_id = _post_id_from_url(url) or sha1(url.encode("utf-8")).hexdigest()[:10]
+        return RedditPost(
+            id=post_id,
+            title=title[:300],
+            subreddit=subreddit,
+            author=None,
+            permalink=permalink,
+            url=permalink,
+            score=0,
+            num_comments=0,
+            selftext=f"Browserbase Search result for '{query}'. {summary}".strip(),
+            created_utc=None,
+        )
 
     def _search_posts(self, query: str, subreddit: str | None, limit: int) -> list[RedditPost]:
         encoded = quote_plus(query)
@@ -258,3 +340,34 @@ class RedditResearchClient:
             score=int(data.get("score") or 0),
             created_utc=float(data["created_utc"]) if data.get("created_utc") is not None else None,
         )
+
+
+class BrowserbaseRedditSearchResult(Protocol):
+    query: str
+    title: str
+    url: str
+    platform: str
+
+
+class RedditBrowserbaseFallback(Protocol):
+    def search_web(self, query: str, *, platform: str, num_results: int = 5) -> list[BrowserbaseRedditSearchResult]:
+        ...
+
+
+def _subreddit_from_url(url: str) -> str:
+    match = re.search(r"reddit\.com/r/([A-Za-z0-9_]{2,21})(?:/|$)", url, flags=re.I)
+    return _normalize_subreddit(match.group(1)) if match else ""
+
+
+def _post_id_from_url(url: str) -> str:
+    match = re.search(r"reddit\.com/r/[A-Za-z0-9_]+/comments/([A-Za-z0-9]+)", url, flags=re.I)
+    return match.group(1) if match else ""
+
+
+def _canonical_reddit_url(url: str) -> str:
+    if url.startswith("/"):
+        return _absolute_permalink(url)
+    match = re.search(r"https?://(?:www\.|old\.|new\.)?reddit\.com([^?#]+)", url, flags=re.I)
+    if match:
+        return _absolute_permalink(match.group(1))
+    return url

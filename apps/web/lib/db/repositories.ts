@@ -41,6 +41,78 @@ function ensureUsageEventsTable() {
   );
 }
 
+function ensureResearchRuntimeTables() {
+  getDb().exec(
+    `CREATE TABLE IF NOT EXISTS research_candidates (
+      id text PRIMARY KEY NOT NULL,
+      run_id text NOT NULL,
+      name text NOT NULL,
+      company text,
+      role text,
+      url text,
+      platform text NOT NULL,
+      source_url text,
+      reason text,
+      confidence real,
+      status text NOT NULL,
+      metadata_json text,
+      created_at integer NOT NULL,
+      updated_at integer,
+      FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+    );
+    CREATE INDEX IF NOT EXISTS research_candidates_run_id_idx ON research_candidates (run_id);
+    CREATE TABLE IF NOT EXISTS research_enrichments (
+      id text PRIMARY KEY NOT NULL,
+      run_id text NOT NULL,
+      candidate_id text,
+      query text,
+      platform text NOT NULL,
+      url text,
+      title text,
+      summary text,
+      evidence_type text,
+      confidence real,
+      status text NOT NULL,
+      error text,
+      metadata_json text,
+      created_at integer NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade,
+      FOREIGN KEY (candidate_id) REFERENCES research_candidates(id) ON DELETE cascade
+    );
+    CREATE INDEX IF NOT EXISTS research_enrichments_run_id_idx ON research_enrichments (run_id);
+    CREATE INDEX IF NOT EXISTS research_enrichments_candidate_id_idx ON research_enrichments (candidate_id);
+    CREATE TABLE IF NOT EXISTS research_scorecards (
+      id text PRIMARY KEY NOT NULL,
+      run_id text NOT NULL,
+      candidate_id text,
+      target_id text,
+      icp_fit integer,
+      pain_evidence integer,
+      reachability integer,
+      call_likelihood integer,
+      design_partner integer,
+      total_score real,
+      rationale text,
+      metadata_json text,
+      created_at integer NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade,
+      FOREIGN KEY (candidate_id) REFERENCES research_candidates(id) ON DELETE cascade,
+      FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE set null
+    );
+    CREATE INDEX IF NOT EXISTS research_scorecards_run_id_idx ON research_scorecards (run_id);
+    CREATE INDEX IF NOT EXISTS research_scorecards_candidate_id_idx ON research_scorecards (candidate_id);
+    CREATE TABLE IF NOT EXISTS research_checkpoints (
+      id text PRIMARY KEY NOT NULL,
+      run_id text NOT NULL,
+      name text NOT NULL,
+      data_json text,
+      created_at integer NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+    );
+    CREATE INDEX IF NOT EXISTS research_checkpoints_run_id_idx ON research_checkpoints (run_id);`
+  );
+}
+
 export function ensureBrowserContexts() {
   const db = getDb();
   const now = Date.now();
@@ -334,6 +406,7 @@ export function deleteRun(runId: string) {
 
 export function getRunDetail(runId: string) {
   ensureUsageEventsTable();
+  ensureResearchRuntimeTables();
   return {
     run: getRun(runId),
     steps: getDb().prepare('SELECT * FROM run_steps WHERE run_id = ? ORDER BY "index"').all(runId) as Row[],
@@ -360,6 +433,10 @@ export function getRunDetail(runId: string) {
     ).all(runId) as Row[],
     filters: getDb().prepare("SELECT * FROM research_filters WHERE run_id = ? ORDER BY created_at").all(runId) as Row[],
     sources: getDb().prepare("SELECT * FROM sources WHERE run_id = ? ORDER BY captured_at").all(runId) as Row[],
+    candidates: getDb().prepare("SELECT * FROM research_candidates WHERE run_id = ? ORDER BY confidence DESC, created_at").all(runId) as Row[],
+    enrichments: getDb().prepare("SELECT * FROM research_enrichments WHERE run_id = ? ORDER BY created_at").all(runId) as Row[],
+    scorecards: getDb().prepare("SELECT * FROM research_scorecards WHERE run_id = ? ORDER BY total_score DESC, created_at").all(runId) as Row[],
+    checkpoints: getDb().prepare("SELECT * FROM research_checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 20").all(runId) as Row[],
     targets: getDb().prepare("SELECT * FROM targets WHERE run_id = ? ORDER BY relevance_score DESC, created_at").all(runId) as Row[],
     drafts: getDb().prepare("SELECT drafts.*, targets.display_name, targets.handle, targets.organization FROM drafts JOIN targets ON targets.id = drafts.target_id WHERE drafts.run_id = ? ORDER BY drafts.created_at").all(runId) as Row[],
     actions: getDb().prepare("SELECT outreach_actions.*, targets.display_name, targets.handle, targets.organization, drafts.body FROM outreach_actions JOIN targets ON targets.id = outreach_actions.target_id LEFT JOIN drafts ON drafts.id = outreach_actions.draft_id WHERE outreach_actions.run_id = ? ORDER BY outreach_actions.created_at").all(runId) as Row[],

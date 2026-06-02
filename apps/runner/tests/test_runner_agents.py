@@ -15,6 +15,7 @@ from reacher_runner.browserbase.research import (
     build_research_queries,
 )
 from reacher_runner.browserbase.yc import is_yc_w22_prompt
+from reacher_runner.code_mode import ResearchCodeModeExecutor, ResearchCodeModeSdk
 from reacher_runner.agents.research_agent import ResearchAgent
 from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
@@ -182,6 +183,55 @@ def test_reddit_research_stops_after_repeated_403s() -> None:
 
     assert client.calls == 3
     assert "appears blocked" in result.errors[-1]
+
+
+def test_reddit_research_uses_browserbase_fallback_after_repeated_403s() -> None:
+    class FallbackSearch:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def search_web(self, query: str, *, platform: str, num_results: int = 5):
+            self.calls.append(query)
+            return [
+                BrowserbaseSearchResult(
+                    query=query,
+                    title="How do small SaaS teams handle deploy failures?",
+                    url="https://www.reddit.com/r/SaaS/comments/abc123/how_do_small_saas_teams_handle_deploy_failures/",
+                    platform=platform,
+                )
+            ]
+
+    class BlockedRedditClient(RedditResearchClient):
+        def __init__(self, fallback):
+            super().__init__(browserbase=fallback)
+            self.calls = 0
+
+        def _search_posts(self, query: str, subreddit: str | None, limit: int):
+            self.calls += 1
+            request = httpx.Request("GET", "https://www.reddit.com/search.json")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("403 Blocked", request=request, response=response)
+
+        def _top_comments(self, post_id: str, limit: int):
+            return []
+
+    fallback = FallbackSearch()
+    client = BlockedRedditClient(fallback)
+    result = client.research(
+        "Find ops pain",
+        planned_queries=["deploy failures"],
+        planned_subreddits=["saas", "devops", "aws", "gcp"],
+        max_searches=30,
+    )
+
+    client.close()
+
+    assert client.calls == 3
+    assert fallback.calls
+    assert result.posts
+    assert result.posts[0].id == "abc123"
+    assert result.posts[0].subreddit == "saas"
+    assert "Browserbase Search fallback" in result.errors[-1]
 
 
 def test_browserbase_usage_recorder_runs_on_calling_thread() -> None:
@@ -402,6 +452,87 @@ def test_browserbase_research_persistence_skips_blocked_fallback_pages(tmp_path:
 
         assert db.conn.execute("SELECT COUNT(*) AS count FROM sources WHERE run_id = 'run_blocked_page'").fetchone()["count"] == 1
         assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_blocked_page'").fetchone()["count"] == 0
+    finally:
+        db.close()
+
+
+def test_code_mode_executor_allows_safe_imports_and_blocks_unsafe_imports(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code_block', 'research', 'claimed', 'Find targets', '{\"platforms\":[\"web\"]}', 1, 1)"
+        )
+        db.conn.commit()
+
+        class StubBrowserbase:
+            pass
+
+        sdk = ResearchCodeModeSdk(run_id="run_code_block", prompt="Find targets", db=db, browserbase=StubBrowserbase(), platforms=["web"])  # type: ignore[arg-type]
+        safe_result = ResearchCodeModeExecutor(db, tmp_path).execute(
+            run_id="run_code_block",
+            code='import json\nimport re\nfrom statistics import mean\ndef run(sdk):\n    return {"ok": bool(re.search("a", "acme")), "avg": mean([1, 2, 3]), "json": json.dumps({"a": 1})}',
+            sdk=sdk,
+        )
+        assert safe_result.ok
+        assert safe_result.output == {"ok": True, "avg": 2, "json": '{"a": 1}'}
+
+        result = ResearchCodeModeExecutor(db, tmp_path).execute(
+            run_id="run_code_block",
+            code="import os\ndef run(sdk):\n    return {}",
+            sdk=sdk,
+        )
+
+        assert not result.ok
+        assert "may not import os" in str(result.error)
+
+        dunder_result = ResearchCodeModeExecutor(db, tmp_path).execute(
+            run_id="run_code_block",
+            code="def run(sdk):\n    return sdk.__class__",
+            sdk=sdk,
+        )
+        assert not dunder_result.ok
+        assert "dunder" in str(dunder_result.error)
+    finally:
+        db.close()
+
+
+def test_code_mode_executor_persists_candidates_scorecards_and_targets(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code', 'research', 'claimed', 'Find founder CTO prospects', '{\"platforms\":[\"web\"]}', 1, 1)"
+        )
+        db.conn.commit()
+
+        class StubBrowserbase:
+            def flush_usage(self):
+                return None
+
+        code = """
+def run(sdk):
+    sdk.checkpoint("plan", {"queries": 1})
+    ids = sdk.save_candidates([{"name": "Jane CTO", "company": "Acme", "role": "Founder CTO", "url": "https://acme.example", "platform": "web", "reason": "AWS SaaS signal", "confidence": 0.9}])
+    sdk.save_enrichments(ids[0], [{"query": "Acme AWS", "platform": "web", "url": "https://acme.example", "title": "Acme", "summary": "Hiring backend engineers for AWS operations", "confidence": 0.8}])
+    sdk.save_scorecards([{"candidate_id": ids[0], "icp_fit": 5, "pain_evidence": 4, "reachability": 4, "call_likelihood": 3, "design_partner": 5, "rationale": "Strong fit"}])
+    sdk.save_targets([{"candidate_id": ids[0], "display_name": "Jane CTO", "url": "https://acme.example", "platform": "web", "target_type": "person", "role_or_context": "Founder CTO", "relevance_score": 0.93, "why_relevant": "Founder-led B2B SaaS with AWS ops signal", "evidence_summary": "Hiring backend engineers for AWS operations", "outreach_angle": "Ask about post-deploy closure", "source_urls": ["https://acme.example"], "metadata": {"scores": {"icp_fit": 5}, "stack_signals": ["AWS"], "pain_signals": ["backend infra ownership"]}}])
+    return {"ok": True}
+"""
+        sdk = ResearchCodeModeSdk(run_id="run_code", prompt="Find founder CTO prospects", db=db, browserbase=StubBrowserbase(), platforms=["web"])  # type: ignore[arg-type]
+        result = ResearchCodeModeExecutor(db, tmp_path).execute(run_id="run_code", code=code, sdk=sdk)
+
+        assert result.ok
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM research_checkpoints WHERE run_id = 'run_code'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM research_candidates WHERE run_id = 'run_code'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM research_enrichments WHERE run_id = 'run_code'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM research_scorecards WHERE run_id = 'run_code' AND target_id IS NOT NULL").fetchone()["count"] == 1
+        target = db.conn.execute("SELECT display_name, relevance_score, metadata_json FROM targets WHERE run_id = 'run_code'").fetchone()
+        assert target["display_name"] == "Jane CTO"
+        assert target["relevance_score"] == 0.93
+        assert "stack_signals" in target["metadata_json"]
     finally:
         db.close()
 

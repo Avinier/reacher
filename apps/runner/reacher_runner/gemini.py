@@ -11,6 +11,7 @@ from google import genai
 from google.genai import types
 
 from reacher_runner.config import Config
+from reacher_runner.code_mode import CODE_MODE_SDK_DOC
 from reacher_runner.usage import UsageEvent, estimate_text_tokens, gemini_event
 
 
@@ -80,6 +81,23 @@ class GeminiResearchClient:
         if api_result.ok:
             return api_result
         cli_result = self._try_gemini_cli(planning_prompt)
+        if cli_result.ok:
+            return cli_result
+        return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
+
+    def generate_code_mode_research(self, prompt: str, platforms: list[str]) -> GeminiResult:
+        code_prompt = (
+            f"{CODE_MODE_SDK_DOC}\n"
+            "Generate a robust code-mode research program for this task. "
+            "The script should checkpoint the plan, fan out searches, save candidates, enrich candidates, score them, "
+            "and save final targets. Keep code deterministic and bounded. Return JSON only with schema: "
+            "{\"code\":\"def run(sdk):\\n    ...\"}. "
+            f"Enabled platforms: {platforms}. Research request: {prompt}"
+        )
+        api_result = self._try_genai_api(code_prompt)
+        if api_result.ok:
+            return api_result
+        cli_result = self._try_gemini_cli(code_prompt)
         if cli_result.ok:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")

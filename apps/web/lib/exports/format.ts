@@ -37,6 +37,10 @@ export function runMarkdown(runId: string) {
     "## Summary",
     "",
     `- Targets found: ${detail.targets.length}`,
+    `- Candidates explored: ${detail.candidates.length}`,
+    `- Enrichments captured: ${detail.enrichments.length}`,
+    `- Scorecards produced: ${detail.scorecards.length}`,
+    `- Checkpoints saved: ${detail.checkpoints.length}`,
     `- Filters found: ${detail.filters.length}`,
     `- Sources captured: ${detail.sources.length}`,
     `- Estimated usage cost: $${Number(detail.usageSummary.estimated_cost_usd ?? 0).toFixed(4)}`,
@@ -53,7 +57,15 @@ export function runMarkdown(runId: string) {
     "",
     "## Targets",
     "",
-    targets || "No targets saved yet."
+    targets || "No targets saved yet.",
+    "",
+    "## Code-mode state",
+    "",
+    "| Candidate | Company | Role | Confidence |",
+    "|---|---|---|---:|",
+    detail.candidates.slice(0, 20).map((candidate) =>
+      `| ${candidate.name ?? ""} | ${candidate.company ?? ""} | ${candidate.role ?? ""} | ${candidate.confidence ?? ""} |`
+    ).join("\n") || "| - | - | - | - |"
   ].join("\n");
 }
 
@@ -99,6 +111,10 @@ export function runJson(runId: string) {
       interpreted_goal: detail.run?.interpreted_goal ?? null,
       filters: detail.filters,
       sources: detail.sources,
+      candidates: detail.candidates,
+      enrichments: detail.enrichments,
+      scorecards: detail.scorecards,
+      checkpoints: detail.checkpoints,
       targets: detail.targets,
       drafts: [],
       usage_summary: detail.usageSummary,

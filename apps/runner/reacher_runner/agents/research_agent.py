@@ -6,6 +6,7 @@ from pathlib import Path
 from reacher_runner.artifacts.writer import ArtifactWriter
 from reacher_runner.browserbase.research import BrowserbaseResearchClient, BrowserbaseSynthesizedTarget
 from reacher_runner.browserbase.yc import YCBatchResearchClient, is_yc_w22_prompt
+from reacher_runner.code_mode import ResearchCodeModeExecutor, ResearchCodeModeSdk, fallback_code_for_prompt
 from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
 from reacher_runner.exports.markdown import render_csv, render_json, render_markdown
@@ -32,15 +33,20 @@ class ResearchAgent:
         if "reddit" in platforms:
             reddit_plan = self._plan_reddit_queries(run["id"], run["prompt"])
             self.db.add_step(run["id"], "search", "Started Reddit public research", "Using Reddit public JSON endpoints for subreddit, post, comment, and user discovery.")
-            client = RedditResearchClient()
+            browserbase_fallback = BrowserbaseResearchClient(self.config, usage_recorder=lambda event: self.db.add_usage_event(run["id"], event)) if self.config and self.config.browserbase_configured else None
+            client = RedditResearchClient(browserbase=browserbase_fallback)
             try:
                 result = client.research(
                     run["prompt"],
                     planned_queries=reddit_plan.get("queries") or None,
                     planned_subreddits=reddit_plan.get("subreddits") or None,
                 )
+                if browserbase_fallback:
+                    browserbase_fallback.flush_usage()
             finally:
                 client.close()
+                if browserbase_fallback:
+                    browserbase_fallback.close()
             list_id = self.db.save_reddit_research(run, result)
             saved_lists.append(list_id)
             self.db.add_step(
@@ -119,34 +125,44 @@ class ResearchAgent:
                         },
                     )
                 else:
-                    plan = self._plan_browserbase_queries(run["id"], run["prompt"], browserbase_platforms)
-                    result = client.research(
-                        run["prompt"],
-                        browserbase_platforms,
-                        context_ids=context_ids,
-                        planned_queries=plan.get("queries"),
-                        max_results_per_query=8,
-                        max_fetches=30,
-                    )
-                    synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages, result.search_results)
-                    if synthesized_targets:
-                        result = replace(result, synthesized_targets=synthesized_targets)
-                    list_id = self.db.save_browserbase_research(run, result)
-                    saved_lists.append(list_id)
-                    self.db.add_step(
-                        run["id"],
-                        "save",
-                        "Saved Browserbase filters, sources, targets, evidence, drafts, and list",
-                        f"Created list {list_id} with {len(result.search_results)} search results, {len(result.fetched_pages)} fetched pages, {len(result.synthesized_targets)} synthesized targets, and {len(result.browser_sessions)} browser sessions.",
-                        output_json={
-                            "queries": result.queries,
-                            "searchResults": len(result.search_results),
-                            "fetchedPages": len(result.fetched_pages),
-                            "synthesizedTargets": len(result.synthesized_targets),
-                            "browserSessions": len(result.browser_sessions),
-                            "errors": result.errors,
-                        },
-                    )
+                    if self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client):
+                        saved_lists.append("code_mode")
+                    else:
+                        self.db.add_step(
+                            run["id"],
+                            "plan",
+                            "Code mode fallback used",
+                            "Generated-code research did not save targets; using the fixed query-planner pipeline.",
+                            status="skipped",
+                        )
+                        plan = self._plan_browserbase_queries(run["id"], run["prompt"], browserbase_platforms)
+                        result = client.research(
+                            run["prompt"],
+                            browserbase_platforms,
+                            context_ids=context_ids,
+                            planned_queries=plan.get("queries"),
+                            max_results_per_query=8,
+                            max_fetches=30,
+                        )
+                        synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages, result.search_results)
+                        if synthesized_targets:
+                            result = replace(result, synthesized_targets=synthesized_targets)
+                        list_id = self.db.save_browserbase_research(run, result)
+                        saved_lists.append(list_id)
+                        self.db.add_step(
+                            run["id"],
+                            "save",
+                            "Saved Browserbase filters, sources, targets, evidence, drafts, and list",
+                            f"Created list {list_id} with {len(result.search_results)} search results, {len(result.fetched_pages)} fetched pages, {len(result.synthesized_targets)} synthesized targets, and {len(result.browser_sessions)} browser sessions.",
+                            output_json={
+                                "queries": result.queries,
+                                "searchResults": len(result.search_results),
+                                "fetchedPages": len(result.fetched_pages),
+                                "synthesizedTargets": len(result.synthesized_targets),
+                                "browserSessions": len(result.browser_sessions),
+                                "errors": result.errors,
+                            },
+                        )
             finally:
                 client.close()
 
@@ -236,6 +252,51 @@ class ResearchAgent:
             "subreddits": subreddits if isinstance(subreddits, list) else [],
             "interpreted_goal": interpreted_goal,
         }
+
+    def _run_code_mode(self, run_id: str, prompt: str, platforms: list[str], client: BrowserbaseResearchClient) -> bool:
+        if not self.config:
+            return False
+        self.db.add_step(
+            run_id,
+            "plan",
+            "Started code-mode research",
+            "Generating and executing a bounded Python research program over Reacher search primitives.",
+        )
+        gemini = GeminiResearchClient(self.config).generate_code_mode_research(prompt, platforms)
+        if gemini.usage_event:
+            self.db.add_usage_event(run_id, gemini.usage_event)
+        if gemini.ok and gemini.data and isinstance(gemini.data.get("code"), str):
+            code = str(gemini.data["code"])
+            provider = gemini.provider
+        else:
+            code = fallback_code_for_prompt(prompt)
+            provider = "deterministic-fallback"
+            self.db.add_step(
+                run_id,
+                "plan",
+                "Code generation fallback used",
+                gemini.error or "Gemini did not return a code string; using deterministic code-mode fallback.",
+                status="skipped",
+            )
+
+        before = self._target_count(run_id)
+        sdk = ResearchCodeModeSdk(run_id=run_id, prompt=prompt, db=self.db, browserbase=client, platforms=platforms)
+        result = ResearchCodeModeExecutor(self.db, self.config.data_dir).execute(run_id=run_id, code=code, sdk=sdk)
+        after = self._target_count(run_id)
+        saved = after - before
+        self.db.add_step(
+            run_id,
+            "act",
+            "Executed code-mode research",
+            f"{provider} code-mode execution {'saved ' + str(saved) + ' targets' if result.ok else 'failed'}.",
+            status="completed" if result.ok else "failed",
+            output_json={"artifactPath": result.artifact_path, "savedTargets": saved, "error": result.error, "output": result.output},
+        )
+        return result.ok and saved > 0
+
+    def _target_count(self, run_id: str) -> int:
+        row = self.db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = ?", (run_id,)).fetchone()
+        return int(row["count"] if row else 0)
 
     def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages, search_results=None) -> list[BrowserbaseSynthesizedTarget]:
         search_results = search_results or []

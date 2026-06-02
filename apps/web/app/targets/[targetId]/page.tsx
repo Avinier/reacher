@@ -53,6 +53,10 @@ function draftText(value: unknown) {
   }
 }
 
+function stringList(value: unknown) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
 function buildSearchSuggestions(target: Record<string, unknown>, metadata: Record<string, unknown>) {
   const name = compactText(target.display_name);
   const handle = compactText(target.handle).replace(/^@/, "");
@@ -89,6 +93,11 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
   const companySocials = socialEntries(metadata.company_socials);
   const founderSocials = socialResults(metadata.founder_social_results);
   const founderNames = Array.isArray(metadata.founder_names) ? metadata.founder_names.map(String).filter(Boolean) : [];
+  const sourceUrls = stringList(metadata.source_urls);
+  const stackSignals = stringList(metadata.stack_signals);
+  const painSignals = stringList(metadata.pain_signals);
+  const scores = parseMetadata(metadata.scores);
+  const outreachAngle = typeof metadata.outreach_angle === "string" ? metadata.outreach_angle : "";
   const searchSuggestions = buildSearchSuggestions(detail.target, metadata);
 
   return (
@@ -176,6 +185,32 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
             </>
           ) : (
             <p>No Gmail outreach recorded for this target.</p>
+          )}
+        </section>
+        <section className="panel">
+          <h2>Prospect signals</h2>
+          {outreachAngle && <p><strong>Angle:</strong> {outreachAngle}</p>}
+          {Object.keys(scores).length > 0 && (
+            <div className="score-grid">
+              {Object.entries(scores).map(([label, value]) => (
+                <span key={label}><strong>{humanizeToken(label)}</strong>{String(value)}</span>
+              ))}
+            </div>
+          )}
+          {stackSignals.length > 0 && <p><strong>Stack:</strong> {stackSignals.join(", ")}</p>}
+          {painSignals.length > 0 && <p><strong>Pain:</strong> {painSignals.join(", ")}</p>}
+          {sourceUrls.length > 0 && (
+            <ul className="link-list">
+              {sourceUrls.map((url) => (
+                <li className="link-item" key={url}>
+                  <span className="link-label">source</span>
+                  <a className="external-link" href={url} target="_blank" rel="noreferrer">{url}</a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!outreachAngle && Object.keys(scores).length === 0 && stackSignals.length === 0 && painSignals.length === 0 && sourceUrls.length === 0 && (
+            <p>No structured prospect signals saved.</p>
           )}
         </section>
         <section className="panel">

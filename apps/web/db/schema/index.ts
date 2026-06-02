@@ -201,6 +201,86 @@ export const lists = sqliteTable("lists", {
   updatedAt: timestamps().updatedAt
 });
 
+export const researchCandidates = sqliteTable(
+  "research_candidates",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    company: text("company"),
+    role: text("role"),
+    url: text("url"),
+    platform: text("platform").notNull(),
+    sourceUrl: text("source_url"),
+    reason: text("reason"),
+    confidence: real("confidence"),
+    status: text("status").notNull(),
+    metadataJson: text("metadata_json", { mode: "json" }),
+    createdAt: timestamps().createdAt,
+    updatedAt: timestamps().updatedAt
+  },
+  (table) => ({ runIdx: index("research_candidates_run_id_idx").on(table.runId) })
+);
+
+export const researchEnrichments = sqliteTable(
+  "research_enrichments",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    candidateId: text("candidate_id").references(() => researchCandidates.id, { onDelete: "cascade" }),
+    query: text("query"),
+    platform: text("platform").notNull(),
+    url: text("url"),
+    title: text("title"),
+    summary: text("summary"),
+    evidenceType: text("evidence_type"),
+    confidence: real("confidence"),
+    status: text("status").notNull(),
+    error: text("error"),
+    metadataJson: text("metadata_json", { mode: "json" }),
+    createdAt: timestamps().createdAt
+  },
+  (table) => ({
+    runIdx: index("research_enrichments_run_id_idx").on(table.runId),
+    candidateIdx: index("research_enrichments_candidate_id_idx").on(table.candidateId)
+  })
+);
+
+export const researchScorecards = sqliteTable(
+  "research_scorecards",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    candidateId: text("candidate_id").references(() => researchCandidates.id, { onDelete: "cascade" }),
+    targetId: text("target_id"),
+    icpFit: integer("icp_fit"),
+    painEvidence: integer("pain_evidence"),
+    reachability: integer("reachability"),
+    callLikelihood: integer("call_likelihood"),
+    designPartner: integer("design_partner"),
+    totalScore: real("total_score"),
+    rationale: text("rationale"),
+    metadataJson: text("metadata_json", { mode: "json" }),
+    createdAt: timestamps().createdAt
+  },
+  (table) => ({
+    runIdx: index("research_scorecards_run_id_idx").on(table.runId),
+    candidateIdx: index("research_scorecards_candidate_id_idx").on(table.candidateId)
+  })
+);
+
+export const researchCheckpoints = sqliteTable(
+  "research_checkpoints",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    dataJson: text("data_json", { mode: "json" }),
+    createdAt: timestamps().createdAt
+  },
+  (table) => ({ runIdx: index("research_checkpoints_run_id_idx").on(table.runId) })
+);
+
 export const targets = sqliteTable(
   "targets",
   {

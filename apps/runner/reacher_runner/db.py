@@ -74,6 +74,89 @@ class ReacherDb:
                 """
             )
             self.conn.execute("CREATE INDEX IF NOT EXISTS run_usage_events_run_id_idx ON run_usage_events (run_id)")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_candidates (
+                    id text PRIMARY KEY NOT NULL,
+                    run_id text NOT NULL,
+                    name text NOT NULL,
+                    company text,
+                    role text,
+                    url text,
+                    platform text NOT NULL,
+                    source_url text,
+                    reason text,
+                    confidence real,
+                    status text NOT NULL,
+                    metadata_json text,
+                    created_at integer NOT NULL,
+                    updated_at integer,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+                )
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_candidates_run_id_idx ON research_candidates (run_id)")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_enrichments (
+                    id text PRIMARY KEY NOT NULL,
+                    run_id text NOT NULL,
+                    candidate_id text,
+                    query text,
+                    platform text NOT NULL,
+                    url text,
+                    title text,
+                    summary text,
+                    evidence_type text,
+                    confidence real,
+                    status text NOT NULL,
+                    error text,
+                    metadata_json text,
+                    created_at integer NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade,
+                    FOREIGN KEY (candidate_id) REFERENCES research_candidates(id) ON DELETE cascade
+                )
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_enrichments_run_id_idx ON research_enrichments (run_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_enrichments_candidate_id_idx ON research_enrichments (candidate_id)")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_scorecards (
+                    id text PRIMARY KEY NOT NULL,
+                    run_id text NOT NULL,
+                    candidate_id text,
+                    target_id text,
+                    icp_fit integer,
+                    pain_evidence integer,
+                    reachability integer,
+                    call_likelihood integer,
+                    design_partner integer,
+                    total_score real,
+                    rationale text,
+                    metadata_json text,
+                    created_at integer NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade,
+                    FOREIGN KEY (candidate_id) REFERENCES research_candidates(id) ON DELETE cascade,
+                    FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE set null
+                )
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_scorecards_run_id_idx ON research_scorecards (run_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_scorecards_candidate_id_idx ON research_scorecards (candidate_id)")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_checkpoints (
+                    id text PRIMARY KEY NOT NULL,
+                    run_id text NOT NULL,
+                    name text NOT NULL,
+                    data_json text,
+                    created_at integer NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE cascade
+                )
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS research_checkpoints_run_id_idx ON research_checkpoints (run_id)")
 
     def claim_next_run(self) -> sqlite3.Row | None:
         now = int(time.time() * 1000)
@@ -129,6 +212,202 @@ class ReacherDb:
                 ),
             )
         return step_id
+
+    def save_research_checkpoint(self, run_id: str, *, name: str, data: Any) -> str:
+        checkpoint_id = new_id("ckpt")
+        now = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO research_checkpoints (id, run_id, name, data_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (checkpoint_id, run_id, name[:160], json.dumps(data), now),
+            )
+        return checkpoint_id
+
+    def save_research_candidate(self, run_id: str, candidate: dict[str, Any]) -> str:
+        candidate_id = str(candidate.get("id") or new_id("cand"))
+        now = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO research_candidates
+                    (id, run_id, name, company, role, url, platform, source_url, reason, confidence, status, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    run_id,
+                    str(candidate.get("name") or candidate.get("display_name") or candidate.get("url") or "Candidate")[:200],
+                    str(candidate.get("company") or "") or None,
+                    str(candidate.get("role") or "") or None,
+                    str(candidate.get("url") or "") or None,
+                    str(candidate.get("platform") or "web"),
+                    str(candidate.get("source_url") or candidate.get("url") or "") or None,
+                    str(candidate.get("reason") or "") or None,
+                    float(candidate.get("confidence") or 0.5),
+                    str(candidate.get("status") or "discovered"),
+                    json.dumps(candidate.get("metadata") or {}),
+                    now,
+                    now,
+                ),
+            )
+        return candidate_id
+
+    def save_research_enrichment(self, run_id: str, candidate_id: str | None, enrichment: dict[str, Any]) -> str:
+        enrichment_id = new_id("enrich")
+        now = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO research_enrichments
+                    (id, run_id, candidate_id, query, platform, url, title, summary, evidence_type, confidence, status, error, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    enrichment_id,
+                    run_id,
+                    candidate_id,
+                    str(enrichment.get("query") or "") or None,
+                    str(enrichment.get("platform") or "web"),
+                    str(enrichment.get("url") or "") or None,
+                    str(enrichment.get("title") or "") or None,
+                    str(enrichment.get("summary") or "")[:2000] or None,
+                    str(enrichment.get("evidence_type") or "observation"),
+                    float(enrichment.get("confidence") or 0.5),
+                    str(enrichment.get("status") or "completed"),
+                    str(enrichment.get("error") or "") or None,
+                    json.dumps(enrichment.get("metadata") or {}),
+                    now,
+                ),
+            )
+        return enrichment_id
+
+    def save_research_scorecard(self, run_id: str, scorecard: dict[str, Any], target_id: str | None = None) -> str:
+        scorecard_id = new_id("score")
+        now = int(time.time() * 1000)
+
+        def score(name: str) -> int | None:
+            value = scorecard.get(name)
+            if value is None:
+                return None
+            return max(1, min(int(value), 5))
+
+        values = {name: score(name) for name in ("icp_fit", "pain_evidence", "reachability", "call_likelihood", "design_partner")}
+        present = [value for value in values.values() if value is not None]
+        total = sum(present) / len(present) if present else None
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO research_scorecards
+                    (id, run_id, candidate_id, target_id, icp_fit, pain_evidence, reachability, call_likelihood, design_partner, total_score, rationale, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scorecard_id,
+                    run_id,
+                    scorecard.get("candidate_id"),
+                    target_id,
+                    values["icp_fit"],
+                    values["pain_evidence"],
+                    values["reachability"],
+                    values["call_likelihood"],
+                    values["design_partner"],
+                    total,
+                    str(scorecard.get("rationale") or "") or None,
+                    json.dumps(scorecard.get("metadata") or {}),
+                    now,
+                ),
+            )
+        return scorecard_id
+
+    def save_code_mode_targets(self, run_id: str, prompt: str, targets: list[dict[str, Any]]) -> list[str]:
+        now = int(time.time() * 1000)
+        list_id = new_id("list")
+        target_ids: list[str] = []
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET interpreted_goal = ? WHERE id = ?",
+                ("Code-mode deep research with generated Python orchestration, checkpoints, candidate enrichment, and scorecards.", run_id),
+            )
+            self.conn.execute(
+                "INSERT INTO lists (id, name, description, source_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, f"Code-mode research: {prompt[:52]}", "Generated-code research with candidates, enrichment evidence, and scorecards.", run_id, now, now),
+            )
+            for rank, target in enumerate(targets[:80], start=1):
+                url = str(target.get("url") or "")
+                if not url:
+                    continue
+                platform = str(target.get("platform") or "web")
+                source_urls = target.get("source_urls") if isinstance(target.get("source_urls"), list) else [url]
+                source_url = str(source_urls[0] or url)
+                display_name = str(target.get("display_name") or target.get("name") or url)[:200]
+                evidence_summary = str(target.get("evidence_summary") or target.get("why_relevant") or "")
+                source_id = new_id("source")
+                self.conn.execute(
+                    "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, ?, 'document', ?, ?, ?, ?)",
+                    (source_id, run_id, platform, source_url, display_name, evidence_summary[:500], now),
+                )
+                target_id = new_id("target")
+                try:
+                    relevance_score = float(target.get("relevance_score") or 0.72)
+                except (TypeError, ValueError):
+                    relevance_score = 0.72
+                metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+                metadata = {
+                    **metadata,
+                    "source_method": "code_mode",
+                    "candidate_id": target.get("candidate_id"),
+                    "source_urls": source_urls,
+                    "outreach_angle": target.get("outreach_angle"),
+                }
+                self.conn.execute(
+                    "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                    (
+                        target_id,
+                        run_id,
+                        list_id,
+                        platform,
+                        str(target.get("target_type") or "page"),
+                        display_name,
+                        target.get("handle"),
+                        url,
+                        target.get("company") or metadata.get("company"),
+                        target.get("role_or_context") or metadata.get("role"),
+                        max(0.0, min(relevance_score, 1.0)),
+                        str(target.get("why_relevant") or "Code-mode research found supporting evidence."),
+                        json.dumps(metadata),
+                        now,
+                        now,
+                    ),
+                )
+                self.conn.execute(
+                    "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_id("li"), list_id, target_id, rank, str(target.get("outreach_angle") or "Code-mode ranked target."), now),
+                )
+                self.conn.execute(
+                    "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'observation', ?, ?, ?, ?)",
+                    (new_id("ev"), target_id, source_id, evidence_summary or str(target.get("why_relevant") or ""), source_url, 0.82, now),
+                )
+                self.conn.execute(
+                    "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'dm', ?, ?, 'generated', ?, ?)",
+                    (
+                        new_id("draft"),
+                        target_id,
+                        run_id,
+                        platform,
+                        f"Hi, I found {display_name} while researching {prompt[:70]}. {str(target.get('outreach_angle') or target.get('why_relevant') or '')[:220]}",
+                        evidence_summary,
+                        now,
+                        now,
+                    ),
+                )
+                candidate_id = target.get("candidate_id")
+                if candidate_id:
+                    self.conn.execute(
+                        "UPDATE research_scorecards SET target_id = ? WHERE run_id = ? AND candidate_id = ? AND target_id IS NULL",
+                        (target_id, run_id, candidate_id),
+                    )
+                target_ids.append(target_id)
+        return target_ids
 
     def add_usage_event(self, run_id: str, event: UsageEvent) -> str:
         event_id = new_id("usage")
@@ -424,9 +703,16 @@ class ReacherDb:
                 )
 
             for error in result.errors:
+                recovered_direct_block = bool(result.posts or result.comments) and (
+                    "403" in error
+                    or "appears blocked" in error.lower()
+                    or "Direct Reddit JSON was blocked" in error
+                )
+                status = "skipped" if recovered_direct_block else "failed"
+                title = "Reddit direct fetch recovered" if recovered_direct_block else "Reddit fetch warning"
                 self.conn.execute(
-                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'Reddit fetch warning', ?, ?, ?)",
-                    (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, ?, 'fetch', ?, ?, ?, ?)",
+                    (new_id("step"), run_id, self.next_step_index(run_id), status, title, error, now, now),
                 )
 
         return list_id
