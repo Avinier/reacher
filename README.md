@@ -21,7 +21,7 @@ uv run pytest
 
 ## Browserbase Deep Research
 
-Research runs use Reddit's public JSON API for Reddit, and Browserbase for all other selected platforms when `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` are configured.
+Research runs use Reddit's public JSON API for Reddit, GitHub's REST API for GitHub project/creator/user discovery, and Browserbase for the remaining selected platforms when `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` are configured. GitHub research works against public API endpoints without a token, but `GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_API_TOKEN` is recommended for higher rate limits.
 
 The runner follows the Browserbase agent pattern:
 

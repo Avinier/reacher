@@ -1,4 +1,4 @@
-export const platforms = ["web", "linkedin", "x", "reddit", "discord"] as const;
+export const platforms = ["web", "linkedin", "x", "reddit", "discord", "github"] as const;
 export const browserPlatforms = ["linkedin", "x", "reddit", "discord"] as const;
 export const runKinds = ["research", "outreach_prepare", "reddit_write", "export", "context_verify"] as const;
 export const runStatuses = [

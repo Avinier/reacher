@@ -10,6 +10,7 @@ from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
 from reacher_runner.exports.markdown import render_csv, render_json, render_markdown
 from reacher_runner.gemini import GeminiResearchClient
+from reacher_runner.github import GitHubResearchClient
 from reacher_runner.reddit import RedditResearchClient
 from reacher_runner.skills.loader import SkillLoader
 
@@ -50,7 +51,34 @@ class ResearchAgent:
                 output_json={"query": result.query, "subreddits": result.subreddits, "posts": len(result.posts), "comments": len(result.comments), "errors": result.errors},
             )
 
-        browserbase_platforms = [platform for platform in platforms if platform != "reddit"]
+        if "github" in platforms:
+            self.db.add_step(
+                run["id"],
+                "search",
+                "Started GitHub API research",
+                "Using GitHub REST API search and enrichment for projects, creators/maintainers, likely users/adopters, evidence, and public contact paths.",
+            )
+            client = GitHubResearchClient(self.config.github_token if self.config else None)
+            try:
+                result = client.research(run["prompt"])
+            finally:
+                client.close()
+            list_id = self.db.save_github_research(run, result)
+            saved_lists.append(list_id)
+            self.db.add_step(
+                run["id"],
+                "save",
+                "Saved GitHub projects, creators, users, evidence, drafts, and list",
+                f"Created list {list_id} with {len(result.projects)} projects and {len(result.users)} user/adopter signals.",
+                output_json={
+                    "queries": [query.__dict__ for query in result.queries],
+                    "projects": len(result.projects),
+                    "users": len(result.users),
+                    "errors": result.errors,
+                },
+            )
+
+        browserbase_platforms = [platform for platform in platforms if platform not in {"reddit", "github"}]
         if browserbase_platforms and self.config and self.config.browserbase_configured:
             context_ids: dict[str, str] = {}
             for platform in browserbase_platforms:

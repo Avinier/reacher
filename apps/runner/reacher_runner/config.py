@@ -60,7 +60,7 @@ def load_config() -> Config:
         data_dir=data_dir,
         browserbase_api_key=os.getenv("BROWSERBASE_API_KEY"),
         browserbase_project_id=os.getenv("BROWSERBASE_PROJECT_ID"),
-        github_token=_first_env("GITHUB_TOKEN", "GH_TOKEN"),
+        github_token=_first_env("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_TOKEN"),
         gemini_api_key=gemini_key,
         google_agent_platform_api_key=os.getenv("GOOGLE_AGENT_PLATFORM_API_KEY"),
         poll_interval_ms=int(os.getenv("REACHER_RUNNER_POLL_INTERVAL_MS", "1000")),

@@ -16,6 +16,15 @@ from reacher_runner.browserbase.yc import is_yc_w22_prompt
 from reacher_runner.agents.research_agent import ResearchAgent
 from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
+from reacher_runner.github import (
+    GitHubContactPath,
+    GitHubCreatorSignal,
+    GitHubProjectSignal,
+    GitHubResearchClient,
+    GitHubResearchResult,
+    GitHubUserSignal,
+    build_github_queries,
+)
 from reacher_runner.reddit.research import RedditResearchClient
 from reacher_runner.runs.executor import RunExecutor
 from reacher_runner.usage import browserbase_search_event
@@ -153,6 +162,7 @@ def test_browserbase_usage_recorder_runs_on_calling_thread() -> None:
         data_dir=Path("."),
         browserbase_api_key="bb_test",
         browserbase_project_id="project_test",
+        github_token=None,
         gemini_api_key=None,
         google_agent_platform_api_key=None,
         poll_interval_ms=1000,
@@ -236,6 +246,7 @@ def test_executor_marks_research_failed_when_all_discovery_failed(tmp_path: Path
         data_dir=tmp_path,
         browserbase_api_key=None,
         browserbase_project_id=None,
+        github_token=None,
         gemini_api_key=None,
         google_agent_platform_api_key=None,
         poll_interval_ms=1000,
@@ -319,6 +330,7 @@ def test_browserbase_aggregation_accepts_search_result_evidence(tmp_path: Path) 
         data_dir=tmp_path,
         browserbase_api_key=None,
         browserbase_project_id=None,
+        github_token=None,
         gemini_api_key=None,
         google_agent_platform_api_key=None,
         poll_interval_ms=1000,
@@ -377,4 +389,182 @@ def test_browserbase_aggregation_accepts_search_result_evidence(tmp_path: Path) 
         assert targets[0].display_name == "Jane CTO"
     finally:
         research_agent_module.GeminiResearchClient = original
+        db.close()
+
+
+def test_github_query_builder_covers_projects_pain_and_users() -> None:
+    queries = build_github_queries("Find browser automation agent projects and users")
+    by_kind = {query.kind: [] for query in queries}
+    for query in queries:
+        by_kind.setdefault(query.kind, []).append(query.query)
+
+    assert any("in:name,description,readme" in query for query in by_kind["repositories"])
+    assert any("type:issue" in query for query in by_kind["issues"])
+    assert any("filename:package.json" in query for query in by_kind["code"])
+    assert all(len(query.query) <= 180 for query in queries)
+
+
+def test_github_client_parses_project_creator_user_and_contact_signals() -> None:
+    class StubGitHubClient(GitHubResearchClient):
+        def __init__(self):
+            pass
+
+        def _get_json(self, path: str):
+            if path.startswith("/search/repositories"):
+                return {
+                    "items": [
+                        {
+                            "full_name": "acme/browser-agent",
+                            "html_url": "https://github.com/acme/browser-agent",
+                            "description": "Browser automation agents for support teams.",
+                            "stargazers_count": 120,
+                            "open_issues_count": 4,
+                            "owner": {"login": "acme", "type": "Organization", "html_url": "https://github.com/acme"},
+                        }
+                    ]
+                }
+            if path.startswith("/search/issues"):
+                return {
+                    "items": [
+                        {
+                            "title": "Browser sessions are flaky in production",
+                            "html_url": "https://github.com/user/app/issues/7",
+                            "repository_url": "https://api.github.com/repos/user/app",
+                            "user": {"login": "jane", "html_url": "https://github.com/jane"},
+                        }
+                    ]
+                }
+            if path.startswith("/search/code"):
+                return {
+                    "items": [
+                        {
+                            "name": "package.json",
+                            "html_url": "https://github.com/user/app/blob/main/package.json",
+                            "repository": {
+                                "full_name": "user/app",
+                                "owner": {"login": "jane", "html_url": "https://github.com/jane"},
+                            },
+                        }
+                    ]
+                }
+            if path == "/repos/acme/browser-agent":
+                return {
+                    "full_name": "acme/browser-agent",
+                    "html_url": "https://github.com/acme/browser-agent",
+                    "description": "Browser automation agents for support teams.",
+                    "homepage": "https://acme.example",
+                    "language": "TypeScript",
+                    "stargazers_count": 120,
+                    "forks_count": 12,
+                    "open_issues_count": 4,
+                    "pushed_at": "2026-05-01T00:00:00Z",
+                    "topics": ["browser-automation", "agents"],
+                    "owner": {"login": "acme", "type": "Organization", "html_url": "https://github.com/acme"},
+                }
+            if path == "/repos/acme/browser-agent/languages":
+                return {"TypeScript": 1000}
+            if path == "/repos/acme/browser-agent/contributors?per_page=3":
+                return [{"login": "maintainer", "html_url": "https://github.com/maintainer", "contributions": 55}]
+            if path == "/users/maintainer":
+                return {
+                    "login": "maintainer",
+                    "html_url": "https://github.com/maintainer",
+                    "name": "Main Tainer",
+                    "company": "Acme",
+                    "blog": "maintainer.example",
+                    "email": "main@example.com",
+                    "twitter_username": "maintainer",
+                }
+            if path == "/repos/acme/browser-agent/readme":
+                return {"content": "QnJvd3NlciBhZ2VudCBmb3Igc3VwcG9ydCB0ZWFtcy4="}
+            if path == "/repos/acme/browser-agent/contents/package.json":
+                return {
+                    "html_url": "https://github.com/acme/browser-agent/blob/main/package.json",
+                    "content": "eyJhdXRob3IiOiJBY21lIDxvcHNAYWNtZS5leGFtcGxlPiJ9",
+                }
+            return None
+
+        def _safe_get_json(self, path: str):
+            return self._get_json(path)
+
+        def close(self):
+            pass
+
+    result = StubGitHubClient().research("Find browser automation agent projects", max_repositories=1)
+
+    assert len(result.projects) == 1
+    project = result.projects[0]
+    assert project.full_name == "acme/browser-agent"
+    assert project.creators[0].login == "maintainer"
+    assert project.creators[0].contact_paths[0].value == "main@example.com"
+    assert project.package_contact_paths[0].value == "ops@acme.example"
+    assert result.users[0].owner_login == "jane"
+    assert project.score > 0.6
+
+
+def test_github_research_persistence_writes_projects_creators_users_and_exports(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_gh', 'research', 'claimed', 'Find browser agent companies', '{\"platforms\":[\"github\"]}', 1, 1)"
+        )
+        db.conn.commit()
+        run = db.conn.execute("SELECT * FROM runs WHERE id = 'run_gh'").fetchone()
+        result = GitHubResearchResult(
+            prompt="Find browser agent companies",
+            queries=build_github_queries("Find browser agent companies")[:2],
+            projects=[
+                GitHubProjectSignal(
+                    full_name="acme/browser-agent",
+                    html_url="https://github.com/acme/browser-agent",
+                    owner_login="acme",
+                    owner_type="Organization",
+                    owner_url="https://github.com/acme",
+                    description="Browser automation agents.",
+                    homepage="https://acme.example",
+                    language="TypeScript",
+                    stars=120,
+                    forks=12,
+                    open_issues=4,
+                    pushed_at="2026-05-01T00:00:00Z",
+                    topics=["agents"],
+                    readme_excerpt="Contact ops@acme.example",
+                    package_contact_paths=[GitHubContactPath("email", "ops@acme.example", "https://github.com/acme/browser-agent", 0.7)],
+                    creators=[
+                        GitHubCreatorSignal(
+                            login="maintainer",
+                            html_url="https://github.com/maintainer",
+                            role="top_contributor",
+                            contributions=55,
+                            contact_paths=[GitHubContactPath("email", "main@example.com", "https://github.com/maintainer", 0.88)],
+                        )
+                    ],
+                    users=[
+                        GitHubUserSignal(
+                            repo_full_name="user/app",
+                            html_url="https://github.com/user/app/issues/7",
+                            signal_type="issue_or_pr",
+                            evidence="Browser sessions are flaky in production",
+                            owner_login="jane",
+                            owner_url="https://github.com/jane",
+                        )
+                    ],
+                    score=0.84,
+                    why_relevant="Matched browser agent company research.",
+                )
+            ],
+        )
+
+        list_id = db.save_github_research(run, result)
+
+        assert db.conn.execute("SELECT source_run_id FROM lists WHERE id = ?", (list_id,)).fetchone()["source_run_id"] == "run_gh"
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_gh'").fetchone()["count"] == 3
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE platform = 'github' AND target_type = 'creator'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE platform = 'github' AND target_type = 'user'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM target_evidence").fetchone()["count"] >= 3
+        metadata = db.conn.execute("SELECT metadata_json FROM targets WHERE target_type = 'project'").fetchone()["metadata_json"]
+        assert "ops@acme.example" in metadata
+    finally:
         db.close()

@@ -9,6 +9,7 @@ from typing import Any
 
 from reacher_runner.browserbase.research import BrowserbaseDeepResearchResult
 from reacher_runner.browserbase.yc import YCBatchResearchResult
+from reacher_runner.github import GitHubResearchResult
 from reacher_runner.reddit import RedditResearchResult
 from reacher_runner.usage import UsageEvent
 
@@ -409,6 +410,221 @@ class ReacherDb:
             for error in result.errors:
                 self.conn.execute(
                     "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'Reddit fetch warning', ?, ?, ?)",
+                    (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
+                )
+
+        return list_id
+
+    def save_github_research(self, run: sqlite3.Row, result: GitHubResearchResult) -> str:
+        now = int(time.time() * 1000)
+        run_id = run["id"]
+        list_id = new_id("list")
+
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET interpreted_goal = ? WHERE id = ?",
+                ("Discover GitHub projects, creators/maintainers, likely users/adopters, and public contact-path signals for outreach.", run_id),
+            )
+            self.conn.execute(
+                "INSERT INTO lists (id, name, description, source_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, f"GitHub research: {result.prompt[:54]}", "GitHub API-backed project, creator, user, evidence, and contact-path targets.", run_id, now, now),
+            )
+            for query in result.queries:
+                self.conn.execute(
+                    "INSERT INTO research_filters (id, run_id, platform, kind, value, reason, confidence, created_at) VALUES (?, ?, 'github', ?, ?, ?, ?, ?)",
+                    (new_id("filter"), run_id, f"github_{query.kind}", query.query, query.reason, 0.84, now),
+                )
+
+            rank = 1
+            source_by_repo: dict[str, str] = {}
+            for project in result.projects:
+                source_id = new_id("source")
+                source_by_repo[project.full_name] = source_id
+                summary = "; ".join(
+                    part
+                    for part in [
+                        project.description[:240],
+                        f"stars={project.stars}",
+                        f"language={project.language}" if project.language else "",
+                        f"topics={', '.join(project.topics[:6])}" if project.topics else "",
+                    ]
+                    if part
+                )
+                self.conn.execute(
+                    "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'github', 'repository', ?, ?, ?, ?)",
+                    (source_id, run_id, project.html_url, project.full_name, summary, now),
+                )
+
+                contact_paths = [contact.__dict__ for contact in project.package_contact_paths]
+                creator_contacts = [contact.__dict__ for creator in project.creators for contact in creator.contact_paths]
+                metadata = {
+                    "source_method": "github_api",
+                    "owner_login": project.owner_login,
+                    "owner_type": project.owner_type,
+                    "homepage": project.homepage,
+                    "language": project.language,
+                    "languages": project.languages,
+                    "topics": project.topics,
+                    "stars": project.stars,
+                    "forks": project.forks,
+                    "open_issues": project.open_issues,
+                    "pushed_at": project.pushed_at,
+                    "package_contact_paths": contact_paths,
+                    "creator_contact_paths": creator_contacts,
+                }
+                target_id = new_id("target")
+                self.conn.execute(
+                    "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'github', 'project', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                    (
+                        target_id,
+                        run_id,
+                        list_id,
+                        project.full_name,
+                        project.full_name,
+                        project.html_url,
+                        project.owner_login,
+                        f"{project.stars} stars; {project.language or 'language unknown'}; owner {project.owner_type or 'unknown'}",
+                        project.score,
+                        project.why_relevant,
+                        json.dumps(metadata),
+                        now,
+                        now,
+                    ),
+                )
+                self.conn.execute(
+                    "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_id("li"), list_id, target_id, rank, "GitHub project/company target.", now),
+                )
+                rank += 1
+                evidence_text = "\n".join(
+                    part
+                    for part in [
+                        project.description,
+                        project.readme_excerpt,
+                        f"Public contact paths: {json.dumps(contact_paths[:5])}" if contact_paths else "",
+                    ]
+                    if part
+                )[:1400]
+                self.conn.execute(
+                    "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'repository_fact', ?, ?, ?, ?)",
+                    (new_id("ev"), target_id, source_id, evidence_text or project.why_relevant, project.html_url, 0.84, now),
+                )
+                self.conn.execute(
+                    "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, 'github', 'email', ?, ?, 'generated', ?, ?)",
+                    (
+                        new_id("draft"),
+                        target_id,
+                        run_id,
+                        f"Subject: Quick question about {project.full_name}\n\nI found {project.full_name} while researching {result.prompt[:80]}. {project.why_relevant[:220]}",
+                        f"Based on GitHub repo metadata, README/package signals, contributors, and public API evidence from {project.html_url}.",
+                        now,
+                        now,
+                    ),
+                )
+
+                for creator in project.creators:
+                    creator_target_id = new_id("target")
+                    creator_metadata = {
+                        "source_method": "github_api",
+                        "repo_full_name": project.full_name,
+                        "role": creator.role,
+                        "contributions": creator.contributions,
+                        "name": creator.name,
+                        "company": creator.company,
+                        "blog": creator.blog,
+                        "email": creator.email,
+                        "contact_paths": [contact.__dict__ for contact in creator.contact_paths],
+                    }
+                    self.conn.execute(
+                        "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'github', 'creator', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                        (
+                            creator_target_id,
+                            run_id,
+                            list_id,
+                            creator.name or creator.login,
+                            creator.login,
+                            creator.html_url,
+                            project.full_name,
+                            f"{creator.role}; {creator.contributions or 0} contributions",
+                            min(0.96, project.score + 0.04),
+                            f"{creator.login} is a top contributor/maintainer signal for {project.full_name}.",
+                            json.dumps(creator_metadata),
+                            now,
+                            now,
+                        ),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (new_id("li"), list_id, creator_target_id, rank, "GitHub creator/maintainer target.", now),
+                    )
+                    rank += 1
+                    self.conn.execute(
+                        "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'maintainer_signal', ?, ?, ?, ?)",
+                        (new_id("ev"), creator_target_id, source_id, f"{creator.login} has {creator.contributions or 0} contributions to {project.full_name}.", creator.html_url, 0.82, now),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at) VALUES (?, ?, ?, 'github', 'email', ?, ?, 'generated', ?, ?)",
+                        (
+                            new_id("draft"),
+                            creator_target_id,
+                            run_id,
+                            f"Subject: Quick question on {project.full_name}\n\nSaw your work on {project.full_name} while researching {result.prompt[:80]}. I had a focused question based on the public GitHub signals if you are open to it.",
+                            f"Based on public contributor data for {project.full_name}.",
+                            now,
+                            now,
+                        ),
+                    )
+
+                for user in project.users:
+                    user_source_id = source_by_repo.get(user.repo_full_name)
+                    if not user_source_id:
+                        user_source_id = new_id("source")
+                        source_by_repo[user.repo_full_name] = user_source_id
+                        self.conn.execute(
+                            "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'github', ?, ?, ?, ?, ?)",
+                            (user_source_id, run_id, user.signal_type, user.html_url, user.repo_full_name or user.html_url, user.evidence, now),
+                        )
+                    user_target_id = new_id("target")
+                    self.conn.execute(
+                        "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'github', 'user', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                        (
+                            user_target_id,
+                            run_id,
+                            list_id,
+                            user.owner_login or user.repo_full_name or "GitHub user signal",
+                            user.owner_login,
+                            user.owner_url or user.html_url,
+                            user.repo_full_name,
+                            user.signal_type,
+                            min(0.9, project.score),
+                            f"Likely user/adopter signal connected to GitHub research: {user.evidence}",
+                            json.dumps({"source_method": "github_api", "signal_type": user.signal_type, "repo_full_name": user.repo_full_name, "contact_paths": [contact.__dict__ for contact in user.contact_paths]}),
+                            now,
+                            now,
+                        ),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO list_items (id, list_id, target_id, rank, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (new_id("li"), list_id, user_target_id, rank, "GitHub user/adopter target.", now),
+                    )
+                    rank += 1
+                    self.conn.execute(
+                        "INSERT INTO target_evidence (id, target_id, source_id, evidence_type, text, url, confidence, created_at) VALUES (?, ?, ?, 'user_signal', ?, ?, ?, ?)",
+                        (new_id("ev"), user_target_id, user_source_id, user.evidence, user.html_url, 0.72, now),
+                    )
+
+            for user in result.users:
+                if user.repo_full_name in source_by_repo:
+                    continue
+                source_id = new_id("source")
+                self.conn.execute(
+                    "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'github', ?, ?, ?, ?, ?)",
+                    (source_id, run_id, user.signal_type, user.html_url, user.repo_full_name or user.html_url, user.evidence, now),
+                )
+
+            for error in result.errors:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'GitHub research warning', ?, ?, ?)",
                     (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
                 )
 

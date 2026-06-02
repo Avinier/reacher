@@ -5,7 +5,7 @@ import { useState, useTransition } from "react";
 import { Play } from "lucide-react";
 import { platforms, runKinds, type Platform, type RunKind } from "@reacher/shared";
 
-const defaultPlatforms: Platform[] = ["web", "linkedin", "x", "reddit", "discord"];
+const defaultPlatforms: Platform[] = ["web", "linkedin", "x", "reddit", "discord", "github"];
 
 export function RunLauncher({ compact = false, listId }: { compact?: boolean; listId?: string }) {
   const router = useRouter();
