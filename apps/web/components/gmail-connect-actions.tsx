@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useTransition } from "react";
 
-export function GmailConnectActions({ configured, connected }: { configured: boolean; connected: boolean }) {
+export function GmailConnectActions({ configured, connected, needsReconnect = false }: { configured: boolean; connected: boolean; needsReconnect?: boolean }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
@@ -16,7 +16,7 @@ export function GmailConnectActions({ configured, connected }: { configured: boo
     return <span className="muted">Add Google OAuth credentials to enable Gmail connect.</span>;
   }
 
-  if (connected) {
+  if (connected && !needsReconnect) {
     return (
       <button className="button secondary" type="button" onClick={disconnect} disabled={isPending}>
         Disconnect Gmail
@@ -26,7 +26,7 @@ export function GmailConnectActions({ configured, connected }: { configured: boo
 
   return (
     <a className="button" href="/api/integrations/gmail/oauth/start">
-      Connect Gmail
+      {connected ? "Reconnect Gmail" : "Connect Gmail"}
     </a>
   );
 }

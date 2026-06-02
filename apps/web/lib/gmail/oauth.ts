@@ -4,8 +4,13 @@ export const gmailOAuthScopes = [
   "openid",
   "email",
   "profile",
-  "https://www.googleapis.com/auth/gmail.compose"
+  "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/gmail.readonly"
 ] as const;
+
+export function hasGmailReadScope(scopes: unknown) {
+  return String(scopes ?? "").split(/\s+/).includes("https://www.googleapis.com/auth/gmail.readonly");
+}
 
 export type GmailOAuthConfig = {
   clientId: string;

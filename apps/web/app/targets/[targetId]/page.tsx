@@ -41,6 +41,7 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
   if (!detail.target) notFound();
   const hasActiveResearch = detail.researchRuns.some((run) => ["queued", "claimed", "running"].includes(String(run.status)));
   const metadata = parseMetadata(detail.target.metadata_json);
+  const gmail = parseMetadata(metadata.gmail);
   const companySocials = socialEntries(metadata.company_socials);
   const founderSocials = socialResults(metadata.founder_social_results);
   const founderNames = Array.isArray(metadata.founder_names) ? metadata.founder_names.map(String).filter(Boolean) : [];
@@ -116,6 +117,20 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
             </ul>
           ) : (
             <p>No founder/social clues saved.</p>
+          )}
+        </section>
+        <section className="panel">
+          <h2>Gmail status</h2>
+          {detail.target.platform === "email" ? (
+            <>
+              <p><strong>Email:</strong> {String(detail.target.handle ?? metadata.email ?? "")}</p>
+              <p><strong>Status:</strong> {String(detail.target.status)}</p>
+              {gmail.draft_id && <p><strong>Gmail draft:</strong> {String(gmail.draft_id)}</p>}
+              {gmail.message_id && <p><strong>Message:</strong> {String(gmail.message_id)}</p>}
+              {gmail.sent_at && <p><strong>Sent:</strong> {formatDateTime(gmail.sent_at)}</p>}
+            </>
+          ) : (
+            <p>No Gmail outreach recorded for this target.</p>
           )}
         </section>
         <section className="panel">

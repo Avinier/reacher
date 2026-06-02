@@ -12,25 +12,25 @@ type NavItem = {
 
 const navGroups: { label: string; items: NavItem[] }[] = [
   {
-    label: "Operate",
+    label: "Command",
     items: [
-      { href: "/", label: "Command", icon: Home },
-      { href: "/runs", label: "Runs", icon: Activity }
+      { href: "/", label: "New Run", icon: Home },
+      { href: "/runs", label: "Run History", icon: Activity }
     ]
   },
   {
-    label: "Data",
+    label: "Workspace",
     items: [
-      { href: "/lists", label: "Lists", icon: ListChecks },
       { href: "/targets", label: "Targets", icon: Target },
+      { href: "/lists", label: "Lists", icon: ListChecks },
       { href: "/drafts", label: "Drafts", icon: MessageSquareText }
     ]
   },
   {
-    label: "Channels",
+    label: "Outreach",
     items: [
-      { href: "/outreach", label: "Outreach", icon: Bot },
-      { href: "/contexts", label: "Contexts", icon: ShieldCheck }
+      { href: "/outreach", label: "Gmail", icon: Bot },
+      { href: "/contexts", label: "Social Contexts", icon: ShieldCheck }
     ]
   },
   {

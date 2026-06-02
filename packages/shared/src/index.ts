@@ -1,4 +1,4 @@
-export const platforms = ["web", "linkedin", "x", "reddit", "discord", "github"] as const;
+export const platforms = ["web", "linkedin", "x", "reddit", "discord", "github", "email"] as const;
 export const browserPlatforms = ["linkedin", "x", "reddit", "discord"] as const;
 export const runKinds = ["research", "outreach_prepare", "reddit_write", "export", "context_verify"] as const;
 export const runStatuses = [
@@ -27,6 +27,7 @@ export type RunSettings = {
   listId?: string;
   targetIds?: string[];
   includeDrafts?: boolean;
+  gmailOutreach?: GmailOutreachPayload;
 };
 
 export type ExportPayload = {
@@ -56,4 +57,23 @@ export type RedditWritePayload = {
   text: string;
   targetId?: string;
   draftId?: string;
+};
+
+export const gmailDraftModes = ["ai", "template"] as const;
+
+export type GmailDraftMode = (typeof gmailDraftModes)[number];
+
+export type GmailRecipient = {
+  email: string;
+  name?: string;
+  company?: string;
+  role?: string;
+  notes?: string;
+};
+
+export type GmailOutreachPayload = {
+  draftMode: GmailDraftMode;
+  recipientsRaw: string;
+  subject?: string;
+  body?: string;
 };

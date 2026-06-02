@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DeleteButton } from "@/components/delete-button";
+import { GmailOutreachActions, GmailRowActions, type GmailActionInput } from "@/components/gmail-outreach-actions";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
 import { getRunDetail } from "@/lib/db/repositories";
 import { formatDateTime, formatDuration, humanizeToken } from "@/lib/format";
@@ -9,12 +10,44 @@ function money(value: unknown) {
   return `$${Number(value ?? 0).toFixed(4)}`;
 }
 
+function parseJson(raw: unknown) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw as Record<string, unknown>;
+  try {
+    return JSON.parse(String(raw)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function parseDraft(raw: unknown) {
+  const parsed = parseJson(raw);
+  return {
+    subject: String(parsed.subject ?? ""),
+    body: String(parsed.body ?? raw ?? "")
+  };
+}
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
   const detail = getRunDetail(runId);
   if (!detail.run) notFound();
   const status = String(detail.run.status);
   const isActive = status === "queued" || status === "claimed" || status === "running";
+  const isGmailOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "email");
+  const gmailActions: GmailActionInput[] = detail.actions.filter((action) => action.platform === "email").map((action) => {
+    const note = parseJson(action.result_note);
+    const draft = parseDraft(action.body);
+    return {
+      actionId: String(action.id),
+      to: String(action.handle ?? note.email ?? ""),
+      subject: String(note.subject ?? draft.subject),
+      body: draft.body,
+      approved: Boolean(note.approved),
+      status: String(action.status),
+      gmailDraftId: note.gmailDraftId ? String(note.gmailDraftId) : undefined
+    };
+  });
 
   return (
     <div className="page">
@@ -65,6 +98,48 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             <strong>{money(detail.usageSummary.estimated_cost_usd)}</strong>
           </div>
         </section>
+        {isGmailOutreach && (
+          <section className="panel wide">
+            <div className="section-heading">
+              <div>
+                <h2>Gmail outreach review</h2>
+                <p className="muted">Approve rows, create Gmail drafts, then send approved drafts. Final send is explicit.</p>
+              </div>
+              <GmailOutreachActions actions={gmailActions} />
+            </div>
+            <table className="table">
+              <thead><tr><th>Recipient</th><th>Subject</th><th>Draft</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody>
+                {detail.actions.filter((action) => action.platform === "email").map((action) => {
+                  const note = parseJson(action.result_note);
+                  const draft = parseDraft(action.body);
+                  const rowAction: GmailActionInput = {
+                    actionId: String(action.id),
+                    to: String(action.handle ?? note.email ?? ""),
+                    subject: String(note.subject ?? draft.subject),
+                    body: draft.body,
+                    approved: Boolean(note.approved),
+                    status: String(action.status),
+                    gmailDraftId: note.gmailDraftId ? String(note.gmailDraftId) : undefined
+                  };
+                  return (
+                    <tr key={String(action.id)}>
+                      <td>
+                        <Link href={`/targets/${action.target_id}`}>{String(action.display_name)}</Link>
+                        <br />
+                        <span className="muted">{String(action.handle ?? "")}</span>
+                      </td>
+                      <td>{rowAction.subject}</td>
+                      <td><pre className="draft-preview">{rowAction.body}</pre></td>
+                      <td><span className={action.status === "done" ? "status" : "status active"}>{String(action.status)}</span></td>
+                      <td><GmailRowActions action={rowAction} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        )}
         <section className="panel">
           <h2>Timeline</h2>
           <div className="timeline">

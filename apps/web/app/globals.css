@@ -203,6 +203,30 @@ p {
   align-items: center;
 }
 
+.segmented {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(360px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--field);
+}
+
+.segmented button {
+  min-height: 38px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.segmented button.active {
+  background: var(--ink);
+  color: var(--panel);
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -249,6 +273,22 @@ input[type="text"] {
   background: var(--field);
   color: var(--ink);
   padding: 11px 12px;
+}
+
+.field-stack {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.draft-preview {
+  max-width: 420px;
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--ink);
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 textarea {

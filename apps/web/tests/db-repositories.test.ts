@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listTargetsByRun, queueRedditWriteAction, upsertGmailIntegration } from "../lib/db/repositories";
+import { createGmailOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -137,6 +137,27 @@ describe("web SQLite repositories", () => {
     expect(actions).toHaveLength(1);
     expect(actions[0].action_type).toBe("submit_post");
     expect(actions[0].status).toBe("waiting_for_operator");
+  });
+
+  it("creates Gmail outreach runs with email targets, drafts, and actions", async () => {
+    const result = await createGmailOutreachRun({
+      prompt: "Send concise outreach",
+      gmailOutreach: {
+        draftMode: "template",
+        recipientsRaw: "email,name,company,role,notes\nfounder@example.com,Fran Founder,Example Co,CEO,Uses agent tooling",
+        subject: "Quick note for {{company}}",
+        body: "Hi {{name}},\n\nSaw {{company}} and wanted to compare notes."
+      }
+    });
+
+    expect(result.validRecipients).toBe(1);
+    const detail = getRunDetail(result.runId);
+    expect(detail.run?.kind).toBe("outreach_prepare");
+    expect(detail.targets[0].platform).toBe("email");
+    expect(detail.drafts[0].platform).toBe("email");
+    expect(String(detail.drafts[0].body)).toContain("Quick note for Example Co");
+    expect(detail.actions[0].action_type).toBe("create_gmail_draft");
+    expect(listRunsByMode("outreach", 10).map((run) => run.id)).toContain(result.runId);
   });
 
   it("stores and disconnects Gmail OAuth integration state", () => {

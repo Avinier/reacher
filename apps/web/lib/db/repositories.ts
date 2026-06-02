@@ -1,5 +1,6 @@
-import { browserPlatforms, type BrowserPlatform, type Platform, type RedditWritePayload, type RunKind } from "@reacher/shared";
+import { browserPlatforms, type BrowserPlatform, type GmailOutreachPayload, type Platform, type RedditWritePayload, type RunKind } from "@reacher/shared";
 import { getDb, id } from "./client";
+import { gmailDraftForRecipient, parseGmailRecipients } from "../gmail/outreach";
 
 type Row = Record<string, unknown>;
 type SqlValue = string | number | bigint | null;
@@ -155,19 +156,96 @@ export function updateContext(platform: BrowserPlatform, fields: { status?: stri
   ).run(status, fields.providerContextId ?? null, fields.lastSessionId ?? null, fields.accountLabel ?? null, fields.lastError ?? null, verifiedAt ?? null, Date.now(), platform);
 }
 
-export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[] }) {
+export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload }) {
   const db = getDb();
   const runId = id("run");
   const now = Date.now();
+  const settings = { platforms: input.platforms, listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach };
   db.prepare(
     `INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at)
      VALUES (?, ?, 'queued', ?, ?, ?, ?)`
-  ).run(runId, input.kind, input.prompt, JSON.stringify({ platforms: input.platforms, listId: input.listId, targetIds: input.targetIds }), now, now);
+  ).run(runId, input.kind, input.prompt, JSON.stringify(settings), now, now);
   db.prepare(
     `INSERT INTO run_steps (id, run_id, "index", status, kind, title, detail, started_at, completed_at)
      VALUES (?, ?, 0, 'completed', 'plan', 'Run queued', 'Waiting for the local runner to claim this job.', ?, ?)`
   ).run(id("step"), runId, now, now);
   return runId;
+}
+
+export async function createGmailOutreachRun(input: { prompt: string; gmailOutreach: GmailOutreachPayload }) {
+  const db = getDb();
+  const now = Date.now();
+  const runId = id("run");
+  const parsed = parseGmailRecipients(input.gmailOutreach.recipientsRaw);
+  const settings = { platforms: ["email"], gmailOutreach: input.gmailOutreach, recipientErrors: parsed.errors };
+
+  db.prepare(
+    `INSERT INTO runs (id, kind, status, prompt, interpreted_goal, settings_json, result_summary, created_at, updated_at, started_at, completed_at)
+     VALUES (?, 'outreach_prepare', 'waiting_for_operator', ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    runId,
+    input.prompt,
+    "Prepare reviewed Gmail outreach drafts from operator-provided recipients.",
+    JSON.stringify(settings),
+    `Prepared ${parsed.recipients.length} Gmail draft${parsed.recipients.length === 1 ? "" : "s"} for review.${parsed.errors.length ? ` ${parsed.errors.length} row error(s).` : ""}`,
+    now,
+    now,
+    now,
+    now
+  );
+  db.prepare(
+    `INSERT INTO run_steps (id, run_id, "index", status, kind, title, detail, input_json, output_json, started_at, completed_at)
+     VALUES (?, ?, 0, 'completed', 'plan', 'Gmail outreach parsed', ?, ?, ?, ?, ?)`
+  ).run(
+    id("step"),
+    runId,
+    `${parsed.recipients.length} valid recipient row(s), ${parsed.errors.length} invalid row(s).`,
+    JSON.stringify({ draftMode: input.gmailOutreach.draftMode }),
+    JSON.stringify({ errors: parsed.errors }),
+    now,
+    now
+  );
+
+  for (let index = 0; index < parsed.recipients.length; index += 1) {
+    const recipient = parsed.recipients[index];
+    const draft = await gmailDraftForRecipient(input.gmailOutreach, recipient, input.prompt);
+    const targetId = id("target");
+    const draftId = id("draft");
+    const actionId = id("act");
+    const metadata = {
+      email: recipient.email,
+      row_number: recipient.rowNumber,
+      gmail: { draft_id: null, message_id: null, sent_at: null }
+    };
+    db.prepare(
+      `INSERT INTO targets
+        (id, run_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at)
+       VALUES (?, ?, 'email', 'person', ?, ?, ?, ?, ?, ?, ?, 'drafted', ?, ?, ?)`
+    ).run(
+      targetId,
+      runId,
+      recipient.displayName,
+      recipient.email,
+      `mailto:${recipient.email}`,
+      recipient.company ?? null,
+      recipient.role ?? null,
+      1,
+      recipient.notes || `Operator-provided Gmail outreach recipient${recipient.company ? ` at ${recipient.company}` : ""}.`,
+      JSON.stringify(metadata),
+      now + index,
+      now + index
+    );
+    db.prepare(
+      `INSERT INTO drafts (id, target_id, run_id, platform, draft_type, body, evidence_summary, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'email', 'email', ?, ?, 'generated', ?, ?)`
+    ).run(draftId, targetId, runId, JSON.stringify({ subject: draft.subject, body: draft.body }), `Gmail ${input.gmailOutreach.draftMode} draft for ${recipient.email}.`, now + index, now + index);
+    db.prepare(
+      `INSERT INTO outreach_actions (id, run_id, target_id, draft_id, platform, action_type, status, result_note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'email', 'create_gmail_draft', 'queued', ?, ?, ?)`
+    ).run(actionId, runId, targetId, draftId, JSON.stringify({ email: recipient.email, subject: draft.subject, approved: false }), now + index, now + index);
+  }
+
+  return { runId, validRecipients: parsed.recipients.length, errors: parsed.errors };
 }
 
 export function queueRedditWriteAction(input: RedditWritePayload) {
@@ -237,6 +315,11 @@ export function listRuns(limit = 25) {
   return getDb().prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
 }
 
+export function listRunsByMode(mode: "research" | "outreach", limit = 100) {
+  const kinds = mode === "research" ? ["research"] : ["outreach_prepare", "reddit_write"];
+  return getDb().prepare(`SELECT * FROM runs WHERE kind IN (${kinds.map(() => "?").join(", ")}) ORDER BY created_at DESC LIMIT ?`).all(...kinds, limit) as Row[];
+}
+
 export function getRun(runId: string) {
   return getDb().prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Row | undefined;
 }
@@ -278,8 +361,60 @@ export function getRunDetail(runId: string) {
     filters: getDb().prepare("SELECT * FROM research_filters WHERE run_id = ? ORDER BY created_at").all(runId) as Row[],
     sources: getDb().prepare("SELECT * FROM sources WHERE run_id = ? ORDER BY captured_at").all(runId) as Row[],
     targets: getDb().prepare("SELECT * FROM targets WHERE run_id = ? ORDER BY relevance_score DESC, created_at").all(runId) as Row[],
+    drafts: getDb().prepare("SELECT drafts.*, targets.display_name, targets.handle, targets.organization FROM drafts JOIN targets ON targets.id = drafts.target_id WHERE drafts.run_id = ? ORDER BY drafts.created_at").all(runId) as Row[],
+    actions: getDb().prepare("SELECT outreach_actions.*, targets.display_name, targets.handle, targets.organization, drafts.body FROM outreach_actions JOIN targets ON targets.id = outreach_actions.target_id LEFT JOIN drafts ON drafts.id = outreach_actions.draft_id WHERE outreach_actions.run_id = ? ORDER BY outreach_actions.created_at").all(runId) as Row[],
     artifacts: getDb().prepare("SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at DESC").all(runId) as Row[]
   };
+}
+
+function parseJsonObject(raw: unknown) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw as Record<string, unknown>;
+  try {
+    return JSON.parse(String(raw)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+export function approveGmailDraft(actionId: string, approved: boolean) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'email'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("Gmail outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), approved };
+  db.prepare("UPDATE outreach_actions SET result_note = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(note), now, actionId);
+  db.prepare("UPDATE drafts SET status = ?, updated_at = ? WHERE id = ?").run(approved ? "approved_for_prepare" : "generated", now, String(action.draft_id));
+  return { actionId, approved };
+}
+
+export function recordGmailDraftCreated(actionId: string, input: { gmailDraftId?: string; gmailMessageId?: string }) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'email'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("Gmail outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), gmailDraftId: input.gmailDraftId, gmailMessageId: input.gmailMessageId };
+  const targetRow = db.prepare("SELECT metadata_json FROM targets WHERE id = ?").get(String(action.target_id)) as Row | undefined;
+  const targetMetadata = parseJsonObject(targetRow?.metadata_json);
+  const gmail = { ...(parseJsonObject(targetMetadata.gmail)), draft_id: input.gmailDraftId, message_id: input.gmailMessageId };
+  db.prepare("UPDATE outreach_actions SET status = 'prepared', result_note = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(note), now, actionId);
+  db.prepare("UPDATE drafts SET status = 'prepared', updated_at = ? WHERE id = ?").run(now, String(action.draft_id));
+  db.prepare("UPDATE targets SET status = 'prepared', metadata_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify({ ...targetMetadata, gmail }), now, String(action.target_id));
+  return { actionId, gmailDraftId: input.gmailDraftId };
+}
+
+export function recordGmailSent(actionId: string, input: { gmailMessageId?: string; gmailThreadId?: string }) {
+  const db = getDb();
+  const action = db.prepare("SELECT * FROM outreach_actions WHERE id = ? AND platform = 'email'").get(actionId) as Row | undefined;
+  if (!action) throw new Error("Gmail outreach action not found");
+  const now = Date.now();
+  const note = { ...parseJsonObject(action.result_note), gmailSentMessageId: input.gmailMessageId, gmailThreadId: input.gmailThreadId, sentAt: now };
+  const targetRow = db.prepare("SELECT metadata_json FROM targets WHERE id = ?").get(String(action.target_id)) as Row | undefined;
+  const targetMetadata = parseJsonObject(targetRow?.metadata_json);
+  const gmail = { ...(parseJsonObject(targetMetadata.gmail)), message_id: input.gmailMessageId, thread_id: input.gmailThreadId, sent_at: now };
+  db.prepare("UPDATE outreach_actions SET action_type = 'send_gmail_draft', status = 'done', result_note = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(note), now, actionId);
+  db.prepare("UPDATE targets SET status = 'sent_by_user', metadata_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify({ ...targetMetadata, gmail }), now, String(action.target_id));
+  return { actionId, sentAt: now };
 }
 
 export function listLists() {
