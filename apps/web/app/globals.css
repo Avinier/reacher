@@ -263,6 +263,12 @@ p {
   opacity: 0.55;
 }
 
+.compact-button {
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .field,
 textarea,
 select,
@@ -289,6 +295,56 @@ input[type="text"] {
   white-space: pre-wrap;
   color: var(--ink);
   font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.draft-preview.full {
+  max-width: none;
+}
+
+.copy-list,
+.copy-card {
+  display: grid;
+  gap: 10px;
+}
+
+.copy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.copy-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.copy-field {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--ink);
+  padding: 9px 10px;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.copy-card {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.copy-card:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.copy-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
 }
 
 textarea {
