@@ -143,6 +143,7 @@ class RedditResearchClient:
         posts: list[RedditPost] = []
         comments: list[RedditComment] = []
         searches_run = 0
+        blocked_attempts = 0
 
         for query in queries:
             search_targets = subreddits or [None]
@@ -150,9 +151,19 @@ class RedditResearchClient:
                 if searches_run >= max_searches:
                     errors.append(f"Reddit search budget reached after {max_searches} query/subreddit attempts.")
                     break
+                if blocked_attempts >= 3:
+                    errors.append("Reddit public JSON appears blocked for this network/session; skipping remaining Reddit searches.")
+                    searches_run = max_searches
+                    break
                 try:
                     searches_run += 1
                     posts.extend(self._search_posts(query, subreddit=subreddit, limit=limit))
+                    blocked_attempts = 0
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code == 403:
+                        blocked_attempts += 1
+                    label = f"r/{subreddit}" if subreddit else "global Reddit search"
+                    errors.append(f"{label} [{query[:40]}]: {error}")
                 except Exception as error:  # noqa: BLE001 - preserve Reddit failure in run evidence
                     label = f"r/{subreddit}" if subreddit else "global Reddit search"
                     errors.append(f"{label} [{query[:40]}]: {error}")

@@ -18,6 +18,22 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
+def _is_unusable_browserbase_page(content: str, status_code: int | None) -> bool:
+    normalized = " ".join(content.lower().split())
+    blocked_markers = [
+        "please enable js",
+        "disable any ad blocker",
+        "enable javascript",
+        "just a moment",
+        "checking your browser",
+        "access denied",
+        "forbidden",
+    ]
+    if status_code in {401, 403, 429, 999}:
+        return True
+    return any(marker in normalized for marker in blocked_markers)
+
+
 class ReacherDb:
     def __init__(self, path: Path):
         self.path = path
@@ -731,6 +747,8 @@ class ReacherDb:
                     )
 
             for page in [] if result.synthesized_targets else result.fetched_pages:
+                if _is_unusable_browserbase_page(page.content, page.status_code):
+                    continue
                 source_id = source_by_url.get(page.url) or new_id("source")
                 if page.url not in source_by_url:
                     source_by_url[page.url] = source_id

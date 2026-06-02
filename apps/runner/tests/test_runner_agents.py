@@ -4,6 +4,8 @@ from threading import get_ident
 from pathlib import Path
 from sqlite3 import connect
 
+import httpx
+
 from reacher_runner.browserbase.research import (
     BrowserbaseDeepResearchResult,
     BrowserbaseFetchResult,
@@ -16,6 +18,7 @@ from reacher_runner.browserbase.yc import is_yc_w22_prompt
 from reacher_runner.agents.research_agent import ResearchAgent
 from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
+from reacher_runner.gemini import GeminiResearchClient
 from reacher_runner.github import (
     GitHubContactPath,
     GitHubCreatorSignal,
@@ -155,6 +158,32 @@ def test_reddit_research_caps_planned_query_subreddit_matrix() -> None:
     assert "search budget reached" in result.errors[-1].lower()
 
 
+def test_reddit_research_stops_after_repeated_403s() -> None:
+    class BlockedRedditClient(RedditResearchClient):
+        def __init__(self):
+            self.calls = 0
+
+        def _search_posts(self, query: str, subreddit: str | None, limit: int):
+            self.calls += 1
+            request = httpx.Request("GET", "https://www.reddit.com/search.json")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("403 Blocked", request=request, response=response)
+
+        def _top_comments(self, post_id: str, limit: int):
+            return []
+
+    client = BlockedRedditClient()
+    result = client.research(
+        "Find ops pain",
+        planned_queries=["q1", "q2", "q3"],
+        planned_subreddits=["saas", "devops", "aws", "gcp"],
+        max_searches=30,
+    )
+
+    assert client.calls == 3
+    assert "appears blocked" in result.errors[-1]
+
+
 def test_browserbase_usage_recorder_runs_on_calling_thread() -> None:
     config = Config(
         root=Path("."),
@@ -183,6 +212,25 @@ def test_browserbase_usage_recorder_runs_on_calling_thread() -> None:
 
     assert recorder_threads
     assert set(recorder_threads) == {main_thread}
+
+
+def test_gemini_api_rejects_oauth_shaped_token(tmp_path: Path) -> None:
+    config = Config(
+        root=tmp_path,
+        database_path=tmp_path / "reacher.sqlite",
+        data_dir=tmp_path,
+        browserbase_api_key=None,
+        browserbase_project_id=None,
+        github_token=None,
+        gemini_api_key="AQ.Ab8RNfakeoauth",
+        google_agent_platform_api_key=None,
+        poll_interval_ms=1000,
+    )
+
+    result = GeminiResearchClient(config)._try_genai_api("Return JSON only. {}")
+
+    assert not result.ok
+    assert "does not look like" in str(result.error)
 
 
 def test_yc_w22_prompt_detection() -> None:
@@ -316,6 +364,44 @@ def test_browserbase_research_persistence_prefers_synthesized_targets(tmp_path: 
         assert target["relevance_score"] == 0.91
         assert "Founder-led" in target["why_relevant"]
         assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_syn'").fetchone()["count"] == 1
+    finally:
+        db.close()
+
+
+def test_browserbase_research_persistence_skips_blocked_fallback_pages(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_blocked_page', 'research', 'claimed', 'Research Adam Nelson', '{\"platforms\":[\"web\"]}', 1, 1)"
+        )
+        db.conn.commit()
+        run = db.conn.execute("SELECT * FROM runs WHERE id = 'run_blocked_page'").fetchone()
+
+        result = BrowserbaseDeepResearchResult(
+            prompt="Research Adam Nelson",
+            platforms=["web"],
+            queries=["Adam Nelson Wellfound"],
+            search_results=[
+                BrowserbaseSearchResult(query="Adam Nelson Wellfound", title="Adam Nelson", url="https://wellfound.com/p/varud", platform="web")
+            ],
+            fetched_pages=[
+                BrowserbaseFetchResult(
+                    url="https://wellfound.com/p/varud",
+                    title="Adam Nelson",
+                    platform="web",
+                    status_code=403,
+                    content_type="text/markdown",
+                    content="Please enable JS and disable any ad blocker",
+                )
+            ],
+        )
+
+        db.save_browserbase_research(run, result)
+
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM sources WHERE run_id = 'run_blocked_page'").fetchone()["count"] == 1
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_blocked_page'").fetchone()["count"] == 0
     finally:
         db.close()
 

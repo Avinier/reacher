@@ -31,6 +31,10 @@ def _json_from_text(text: str) -> dict[str, Any]:
     return json.loads(stripped)
 
 
+def _looks_like_gemini_api_key(value: str | None) -> bool:
+    return bool(value and value.startswith("AIza"))
+
+
 class GeminiResearchClient:
     def __init__(self, config: Config):
         self.config = config
@@ -110,9 +114,9 @@ class GeminiResearchClient:
                 "url": page.get("url"),
                 "title": page.get("title"),
                 "platform": page.get("platform"),
-                "content": str(page.get("content") or "")[:1800],
+                "content": str(page.get("content") or "")[:900],
             }
-            for page in pages[:30]
+            for page in pages[:24]
             if page.get("url")
         ]
         search_payload = [
@@ -124,7 +128,7 @@ class GeminiResearchClient:
                 "author": result.get("author"),
                 "published_date": result.get("published_date"),
             }
-            for result in (search_results or [])[:90]
+            for result in (search_results or [])[:50]
             if result.get("url")
         ]
         aggregation_prompt = (
@@ -151,6 +155,8 @@ class GeminiResearchClient:
     def _try_genai_api(self, prompt: str) -> GeminiResult:
         if not self.config.gemini_api_key:
             return GeminiResult(ok=False, provider="google-genai", error="Gemini API key is not configured")
+        if not _looks_like_gemini_api_key(self.config.gemini_api_key):
+            return GeminiResult(ok=False, provider="google-genai", error="Configured Gemini key does not look like a Google AI Studio API key")
         try:
             client = genai.Client(api_key=self.config.gemini_api_key)
             response = client.models.generate_content(
@@ -180,7 +186,7 @@ class GeminiResearchClient:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=300,
             )
             if completed.returncode != 0:
                 return GeminiResult(ok=False, provider="gemini-cli", error=(completed.stderr or completed.stdout).strip()[:1000])
