@@ -299,6 +299,7 @@ export const targets = sqliteTable(
     status: text("status", {
       enum: ["new", "saved", "drafted", "prepared", "sent_by_user", "skipped", "needs_review"]
     }).notNull(),
+    outreachedAt: integer("outreached_at"),
     metadataJson: text("metadata_json", { mode: "json" }),
     createdAt: timestamps().createdAt,
     updatedAt: timestamps().updatedAt

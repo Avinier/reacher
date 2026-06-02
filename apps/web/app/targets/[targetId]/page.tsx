@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CopyButton } from "@/components/copy-button";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
+import { TargetOutreachToggle } from "@/components/target-outreach-toggle";
 import { TargetResearchButton } from "@/components/target-research-button";
 import { getTargetDetail } from "@/lib/db/repositories";
 import { formatDateTime, humanizeToken } from "@/lib/format";
@@ -113,7 +114,10 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
             {" "}on {formatDateTime(detail.target.run_created_at)}
           </p>
         </div>
-        <span className="status">{String(detail.target.status)}</span>
+        <div className="target-header-actions">
+          <TargetOutreachToggle targetId={targetId} outreachedAt={detail.target.outreached_at} />
+          <span className="status">{String(detail.target.status)}</span>
+        </div>
       </header>
       <div className="grid">
         <section className="panel wide emphasis-panel">

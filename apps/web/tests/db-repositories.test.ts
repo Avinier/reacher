@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, upsertGmailIntegration } from "../lib/db/repositories";
+import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, setTargetOutreached, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -117,6 +117,22 @@ describe("web SQLite repositories", () => {
     expect(run?.kind).toBe("research");
     expect(String(run?.prompt)).toContain("Research further on Deep Target");
     expect(JSON.parse(String(run?.settings_json))).toMatchObject({ targetIds: ["target_deep"] });
+  });
+
+  it("toggles target outreach independently from target status", () => {
+    const now = Date.now();
+    const db = getDb();
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_outreach_toggle', 'research', 'completed', 'Find', ?, ?)").run(now, now);
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, status, created_at, updated_at) VALUES ('target_outreach_toggle', 'run_outreach_toggle', 'linkedin', 'person', 'Toggle Target', 'prepared', ?, ?)").run(now, now);
+
+    const marked = setTargetOutreached("target_outreach_toggle", true);
+    expect(marked?.outreached_at).toBeTruthy();
+    expect(getTargetDetail("target_outreach_toggle").target?.status).toBe("prepared");
+    expect(listTargetsByRun(1)[0].outreached_at).toBeTruthy();
+
+    const unmarked = setTargetOutreached("target_outreach_toggle", false);
+    expect(unmarked?.outreached_at).toBeNull();
+    expect(getTargetDetail("target_outreach_toggle").target?.status).toBe("prepared");
   });
 
   it("queues explicit Reddit write actions with a visible audit trail", () => {

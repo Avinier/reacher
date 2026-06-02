@@ -114,6 +114,17 @@ function ensureResearchRuntimeTables() {
   );
 }
 
+function ensureTargetOutreachColumn() {
+  const db = getDb();
+  const migrationId = "0003_target_outreach_toggle.sql";
+  const columns = db.prepare("PRAGMA table_info(targets)").all() as Row[];
+  db.exec("CREATE TABLE IF NOT EXISTS __drizzle_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);");
+  if (!columns.some((column) => column.name === "outreached_at")) {
+    db.exec("ALTER TABLE targets ADD COLUMN outreached_at integer");
+  }
+  db.prepare("INSERT OR IGNORE INTO __drizzle_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, Date.now());
+}
+
 export function ensureBrowserContexts() {
   const db = getDb();
   const now = Date.now();
@@ -623,6 +634,7 @@ export function listLists() {
 }
 
 export function listOutreachTargetOptions(limit = 100) {
+  ensureTargetOutreachColumn();
   return getDb().prepare(
     `SELECT id, display_name, platform, profile_url, organization
      FROM targets
@@ -632,6 +644,7 @@ export function listOutreachTargetOptions(limit = 100) {
 }
 
 export function getListDetail(listId: string) {
+  ensureTargetOutreachColumn();
   return {
     list: getDb().prepare("SELECT * FROM lists WHERE id = ?").get(listId) as Row | undefined,
     targets: getDb().prepare(
@@ -652,10 +665,12 @@ export function deleteList(listId: string) {
 }
 
 export function listTargets(limit = 100) {
+  ensureTargetOutreachColumn();
   return getDb().prepare("SELECT * FROM targets ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
 }
 
 export function listTargetsByRun(limit = 50) {
+  ensureTargetOutreachColumn();
   return getDb().prepare(
     `WITH recent_runs AS (
        SELECT runs.*
@@ -678,6 +693,7 @@ export function listTargetsByRun(limit = 50) {
 }
 
 export function getTargetDetail(targetId: string) {
+  ensureTargetOutreachColumn();
   return {
     target: getDb().prepare(
       `SELECT targets.*,
@@ -701,6 +717,16 @@ export function getTargetDetail(targetId: string) {
        ORDER BY created_at DESC`
     ).all(`%"${targetId}"%`) as Row[]
   };
+}
+
+export function setTargetOutreached(targetId: string, outreached: boolean) {
+  ensureTargetOutreachColumn();
+  const now = Date.now();
+  const result = getDb().prepare(
+    "UPDATE targets SET outreached_at = ?, updated_at = ? WHERE id = ?"
+  ).run(outreached ? now : null, now, targetId);
+  if (result.changes === 0) return undefined;
+  return getDb().prepare("SELECT id, outreached_at FROM targets WHERE id = ?").get(targetId) as Row | undefined;
 }
 
 export function createTargetResearchRun(targetId: string) {

@@ -4,6 +4,7 @@ import { DeleteButton } from "@/components/delete-button";
 import { GmailOutreachActions, GmailRowActions, type GmailActionInput } from "@/components/gmail-outreach-actions";
 import { LinkedInRowActions, type LinkedInActionInput } from "@/components/linkedin-outreach-actions";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
+import { TargetOutreachToggle } from "@/components/target-outreach-toggle";
 import { getRunDetail } from "@/lib/db/repositories";
 import { formatDateTime, formatDuration, humanizeToken } from "@/lib/format";
 
@@ -301,12 +302,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           <h2>Targets</h2>
           <p className="muted">Relevance score is Reacher ranking confidence for this run. Higher means the target is earlier in the saved list and has stronger prompt-matching evidence.</p>
           <table className="table">
-            <thead><tr><th>Name</th><th>Platform</th><th>Why</th><th>Relevance score</th></tr></thead>
+            <thead><tr><th>Name</th><th>Platform</th><th>Outreach</th><th>Why</th><th>Relevance score</th></tr></thead>
             <tbody>
               {detail.targets.map((target) => (
                 <tr key={String(target.id)}>
                   <td><Link href={`/targets/${target.id}`}>{String(target.display_name)}</Link></td>
                   <td>{String(target.platform)}</td>
+                  <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} compact /></td>
                   <td>{String(target.why_relevant ?? "")}</td>
                   <td>{String(target.relevance_score ?? "")}</td>
                 </tr>

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { TargetOutreachToggle } from "@/components/target-outreach-toggle";
 import { listTargetsByRun } from "@/lib/db/repositories";
 import { formatDateTime, humanizeToken } from "@/lib/format";
 
@@ -35,12 +36,13 @@ export default function TargetsPage() {
               </div>
             </div>
             <table className="table">
-              <thead><tr><th>Name</th><th>Platform</th><th>Status</th><th>Why</th></tr></thead>
+              <thead><tr><th>Name</th><th>Platform</th><th>Outreach</th><th>Status</th><th>Why</th></tr></thead>
               <tbody>
                 {runTargets.map((target) => (
                   <tr key={String(target.id)}>
                     <td><Link href={`/targets/${target.id}`}>{String(target.display_name)}</Link></td>
                     <td>{String(target.platform)}</td>
+                    <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} compact /></td>
                     <td>{String(target.status)}</td>
                     <td>{String(target.why_relevant ?? "")}</td>
                   </tr>

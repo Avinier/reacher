@@ -389,6 +389,47 @@ textarea {
   justify-content: flex-start;
 }
 
+.outreach-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.outreach-toggle.compact .outreach-check {
+  padding: 5px 8px;
+}
+
+.outreach-check {
+  cursor: pointer;
+  user-select: none;
+}
+
+.outreach-check input {
+  margin: 0;
+}
+
+.outreach-check svg {
+  color: var(--muted);
+}
+
+.outreach-check.checked {
+  color: var(--accent);
+  border-color: oklch(42% 0.095 176 / 0.45);
+  background: oklch(42% 0.095 176 / 0.1);
+}
+
+.outreach-check.checked svg {
+  color: var(--accent);
+}
+
+.target-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .status {
   display: inline-flex;
   align-items: center;
