@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { RunLauncher } from "@/components/run-launcher";
 import { RunTable } from "@/components/tables";
-import { getBrowserContexts, listLists, listOutreachTargetOptions, listRuns } from "@/lib/db/repositories";
+import { getBrowserContexts, getTargetOutreachStats, listLists, listOutreachTargetOptions, listRuns } from "@/lib/db/repositories";
 
 export default function HomePage() {
   const contexts = getBrowserContexts();
   const runs = listRuns(6);
   const lists = listLists();
   const outreachTargets = listOutreachTargetOptions(80);
+  const outreachStats = getTargetOutreachStats();
 
   return (
     <div className="page">
@@ -35,6 +36,20 @@ export default function HomePage() {
           <h2>Saved Lists</h2>
           <div className="metric">{lists.length}</div>
           <p>Filtered research outputs available for export or outreach preparation.</p>
+        </section>
+        <section className="panel third">
+          <h2>Outreach progress</h2>
+          <div className="mini-metrics">
+            <span>
+              <strong>{outreachStats.outreachedToday}</strong>
+              <small>today</small>
+            </span>
+            <span>
+              <strong>{outreachStats.outreachedTotal}</strong>
+              <small>historical</small>
+            </span>
+          </div>
+          <p>{outreachStats.notUsefulTotal} targets marked not useful.</p>
         </section>
         <section className="panel third">
           <h2>Runner</h2>

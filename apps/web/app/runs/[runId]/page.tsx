@@ -308,7 +308,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                 <tr key={String(target.id)}>
                   <td><Link href={`/targets/${target.id}`}>{String(target.display_name)}</Link></td>
                   <td>{String(target.platform)}</td>
-                  <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} compact /></td>
+                  <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} notUsefulAt={target.not_useful_at} compact /></td>
                   <td>{String(target.why_relevant ?? "")}</td>
                   <td>{String(target.relevance_score ?? "")}</td>
                 </tr>

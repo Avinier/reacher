@@ -116,13 +116,19 @@ function ensureResearchRuntimeTables() {
 
 function ensureTargetOutreachColumn() {
   const db = getDb();
-  const migrationId = "0003_target_outreach_toggle.sql";
+  const migrationIds = ["0003_target_outreach_toggle.sql", "0004_target_not_useful_feedback.sql"];
   const columns = db.prepare("PRAGMA table_info(targets)").all() as Row[];
   db.exec("CREATE TABLE IF NOT EXISTS __drizzle_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);");
   if (!columns.some((column) => column.name === "outreached_at")) {
     db.exec("ALTER TABLE targets ADD COLUMN outreached_at integer");
   }
-  db.prepare("INSERT OR IGNORE INTO __drizzle_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, Date.now());
+  if (!columns.some((column) => column.name === "not_useful_at")) {
+    db.exec("ALTER TABLE targets ADD COLUMN not_useful_at integer");
+  }
+  const now = Date.now();
+  for (const migrationId of migrationIds) {
+    db.prepare("INSERT OR IGNORE INTO __drizzle_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, now);
+  }
 }
 
 export function ensureBrowserContexts() {
@@ -643,6 +649,25 @@ export function listOutreachTargetOptions(limit = 100) {
   ).all(limit) as Row[];
 }
 
+export function getTargetOutreachStats(now = new Date()) {
+  ensureTargetOutreachColumn();
+  const dayStart = new Date(now);
+  dayStart.setHours(0, 0, 0, 0);
+  const row = getDb().prepare(
+    `SELECT
+       COALESCE(SUM(CASE WHEN outreached_at >= ? THEN 1 ELSE 0 END), 0) AS outreached_today,
+       COALESCE(SUM(CASE WHEN outreached_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS outreached_total,
+       COALESCE(SUM(CASE WHEN not_useful_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS not_useful_total
+     FROM targets`
+  ).get(dayStart.getTime()) as Row | undefined;
+  return {
+    outreachedToday: Number(row?.outreached_today ?? 0),
+    outreachedTotal: Number(row?.outreached_total ?? 0),
+    notUsefulTotal: Number(row?.not_useful_total ?? 0),
+    dayStart: dayStart.getTime()
+  };
+}
+
 export function getListDetail(listId: string) {
   ensureTargetOutreachColumn();
   return {
@@ -727,6 +752,19 @@ export function setTargetOutreached(targetId: string, outreached: boolean) {
   ).run(outreached ? now : null, now, targetId);
   if (result.changes === 0) return undefined;
   return getDb().prepare("SELECT id, outreached_at FROM targets WHERE id = ?").get(targetId) as Row | undefined;
+}
+
+export function setTargetFeedback(targetId: string, feedback: { outreached?: boolean; notUseful?: boolean }) {
+  ensureTargetOutreachColumn();
+  const now = Date.now();
+  const target = getDb().prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row | undefined;
+  if (!target) return undefined;
+  const outreachedAt = typeof feedback.outreached === "boolean" ? (feedback.outreached ? now : null) : (target.outreached_at as SqlValue);
+  const notUsefulAt = typeof feedback.notUseful === "boolean" ? (feedback.notUseful ? now : null) : (target.not_useful_at as SqlValue);
+  getDb().prepare(
+    "UPDATE targets SET outreached_at = ?, not_useful_at = ?, updated_at = ? WHERE id = ?"
+  ).run(outreachedAt, notUsefulAt, now, targetId);
+  return getDb().prepare("SELECT id, outreached_at, not_useful_at FROM targets WHERE id = ?").get(targetId) as Row | undefined;
 }
 
 export function createTargetResearchRun(targetId: string) {

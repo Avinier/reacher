@@ -422,6 +422,16 @@ textarea {
   color: var(--accent);
 }
 
+.outreach-check.not-useful.checked {
+  color: var(--accent-2);
+  border-color: oklch(47% 0.16 29 / 0.45);
+  background: oklch(47% 0.16 29 / 0.1);
+}
+
+.outreach-check.not-useful.checked svg {
+  color: var(--accent-2);
+}
+
 .target-header-actions {
   display: flex;
   align-items: center;
@@ -624,6 +634,33 @@ textarea {
 }
 
 .summary-label {
+  color: var(--muted);
+  font: 760 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+.mini-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.mini-metrics span {
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: var(--field);
+}
+
+.mini-metrics strong {
+  font: 800 28px/1 var(--font-display);
+  color: var(--ink);
+}
+
+.mini-metrics small {
   color: var(--muted);
   font: 760 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
   text-transform: uppercase;

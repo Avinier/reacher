@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, setTargetOutreached, upsertGmailIntegration } from "../lib/db/repositories";
+import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, getTargetOutreachStats, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, setTargetFeedback, setTargetOutreached, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -130,9 +130,36 @@ describe("web SQLite repositories", () => {
     expect(getTargetDetail("target_outreach_toggle").target?.status).toBe("prepared");
     expect(listTargetsByRun(1)[0].outreached_at).toBeTruthy();
 
+    const notUseful = setTargetFeedback("target_outreach_toggle", { notUseful: true });
+    expect(notUseful?.not_useful_at).toBeTruthy();
+    expect(notUseful?.outreached_at).toBeTruthy();
+    expect(getTargetDetail("target_outreach_toggle").target?.status).toBe("prepared");
+
     const unmarked = setTargetOutreached("target_outreach_toggle", false);
     expect(unmarked?.outreached_at).toBeNull();
+    expect(getTargetDetail("target_outreach_toggle").target?.not_useful_at).toBeTruthy();
+
+    const usefulAgain = setTargetFeedback("target_outreach_toggle", { notUseful: false });
+    expect(usefulAgain?.not_useful_at).toBeNull();
     expect(getTargetDetail("target_outreach_toggle").target?.status).toBe("prepared");
+  });
+
+  it("counts target outreach for today and all time", () => {
+    const db = getDb();
+    const today = new Date("2026-06-03T15:00:00");
+    const todayStart = new Date(today);
+    todayStart.setHours(0, 0, 0, 0);
+    const yesterday = todayStart.getTime() - 60_000;
+    db.prepare("INSERT INTO runs (id, kind, status, prompt, created_at, updated_at) VALUES ('run_stats', 'research', 'completed', 'Find', ?, ?)").run(today.getTime(), today.getTime());
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, status, outreached_at, created_at, updated_at) VALUES ('target_today', 'run_stats', 'linkedin', 'person', 'Today', 'saved', ?, ?, ?)").run(today.getTime(), today.getTime(), today.getTime());
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, status, outreached_at, created_at, updated_at) VALUES ('target_old', 'run_stats', 'linkedin', 'person', 'Old', 'saved', ?, ?, ?)").run(yesterday, yesterday, yesterday);
+    db.prepare("INSERT INTO targets (id, run_id, platform, target_type, display_name, status, not_useful_at, created_at, updated_at) VALUES ('target_not_useful', 'run_stats', 'linkedin', 'person', 'Nope', 'saved', ?, ?, ?)").run(today.getTime(), today.getTime(), today.getTime());
+
+    expect(getTargetOutreachStats(today)).toMatchObject({
+      outreachedToday: 1,
+      outreachedTotal: 2,
+      notUsefulTotal: 1
+    });
   });
 
   it("queues explicit Reddit write actions with a visible audit trail", () => {

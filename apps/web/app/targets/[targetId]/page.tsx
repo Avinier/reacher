@@ -115,7 +115,7 @@ export default async function TargetDetailPage({ params }: { params: Promise<{ t
           </p>
         </div>
         <div className="target-header-actions">
-          <TargetOutreachToggle targetId={targetId} outreachedAt={detail.target.outreached_at} />
+          <TargetOutreachToggle targetId={targetId} outreachedAt={detail.target.outreached_at} notUsefulAt={detail.target.not_useful_at} />
           <span className="status">{String(detail.target.status)}</span>
         </div>
       </header>
