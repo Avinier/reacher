@@ -298,75 +298,212 @@ class ResearchCodeModeExecutor:
 def fallback_code_for_prompt(prompt: str) -> str:
     prompt_json = json.dumps(prompt)
     return f'''
+import re
+
 def run(sdk):
     queries = [
         {{"platform": "web", "query": "\\"Founder CTO\\" \\"AWS\\" \\"B2B SaaS\\""}},
         {{"platform": "web", "query": "\\"Technical Co-Founder\\" \\"GitHub Actions\\" \\"AWS\\""}},
+        {{"platform": "web", "query": "\\"Founder CTO\\" \\"Postgres\\" \\"SaaS\\""}},
+        {{"platform": "web", "query": "\\"Head of Engineering\\" \\"AWS\\" \\"Seed\\""}},
+        {{"platform": "web", "query": "\\"Founder\\" \\"Terraform\\" \\"SaaS\\""}},
+        {{"platform": "web", "query": "\\"technical founder\\" \\"production\\" \\"AWS\\""}},
+        {{"platform": "web", "query": "\\"CTO\\" \\"ECS\\" \\"GitHub Actions\\" \\"Postgres\\""}},
         {{"platform": "web", "query": "site:ycombinator.com/companies \\"AWS\\" \\"B2B\\""}},
         {{"platform": "web", "query": "site:workatastartup.com \\"CTO\\" \\"AWS\\""}},
         {{"platform": "web", "query": "site:wellfound.com \\"technical cofounder\\" \\"AWS\\""}},
         {{"platform": "linkedin", "query": "\\"Founder CTO\\" \\"AWS\\" site:linkedin.com/in"}},
+        {{"platform": "linkedin", "query": "\\"Head of Engineering\\" \\"SaaS\\" site:linkedin.com/in"}},
         {{"platform": "x", "query": "\\"technical founder\\" \\"production\\" \\"AWS\\" site:x.com"}},
+        {{"platform": "web", "query": "site:theorg.com/org \\"Founder\\" \\"CTO\\" \\"AWS\\""}},
+        {{"platform": "web", "query": "site:producthunt.com/products \\"Founder CTO\\" \\"SaaS\\""}},
+        {{"platform": "web", "query": "site:news.ycombinator.com \\"Founder CTO\\" \\"AWS\\" \\"SaaS\\""}},
     ]
     sdk.checkpoint("code_mode_queries", {{"prompt": {prompt_json}, "queries": queries}})
-    results = sdk.search_many(queries, limit=8)
+    results = sdk.search_many(queries, limit=10)
     sdk.checkpoint("code_mode_search_results", {{"count": len(results), "sample": results[:10]}})
-    pages = sdk.fetch_many(results, limit=30)
+
+    role_pattern = r"(?:Founder\\s*&?\\s*CTO|Founder-CTO|Co-Founder\\s*/?\\s*CTO|Co-Founder\\s*&?\\s*CTO|Technical Co-Founder|Technical Cofounder|Founder|CTO|Chief Technology Officer|Head of Engineering|VP Engineering)"
+
+    def clean(value):
+        return " ".join(str(value or "").replace("|", " ").replace("—", " - ").split()).strip(" -")
+
+    def slug_title(value):
+        text = re.sub(r"[-_]+", " ", str(value or "").strip("/"))
+        return " ".join(part.capitalize() for part in text.split() if part)
+
+    def trim_person_name(value):
+        parts = clean(value).split()
+        publishers = {{"linkedin", "indianflux", "medium", "substack", "github", "wellfound", "himalayas"}}
+        while len(parts) > 2 and parts[-1].lower().strip(".") in publishers:
+            parts = parts[:-1]
+        return " ".join(parts)
+
+    def company_from_url(url):
+        patterns = [
+            r"ycombinator\\.com/companies/([^/?#]+)",
+            r"wellfound\\.com/company/([^/?#]+)",
+            r"wellfound\\.com/companies/([^/?#]+)",
+            r"producthunt\\.com/products/([^/?#]+)",
+            r"theorg\\.com/org/([^/?#]+)",
+            r"workatastartup\\.com/companies/([^/?#]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return slug_title(match.group(1))
+        return ""
+
+    def person_from_url(url):
+        patterns = [
+            r"linkedin\\.com/in/([^/?#]+)",
+            r"x\\.com/([^/?#]+)",
+            r"twitter\\.com/([^/?#]+)",
+            r"theorg\\.com/org/[^/]+/org-chart/([^/?#]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                value = match.group(1)
+                if value.lower() not in ("home", "company", "share", "intent"):
+                    return slug_title(value)
+        return ""
+
+    def person_from_title(title):
+        founded_segment = re.search(r"founded\\s+by\\s+(.+?)(?:\\s+\\||$)", title, flags=re.I)
+        if founded_segment:
+            segment = clean(founded_segment.group(1))
+            descriptor = re.search(r"(?:Leader|Founder|Engineer|Architect|Builder)\\s+([A-Z][A-Za-z.'-]+(?:\\s+[A-Z][A-Za-z.'-]+){{1,2}})$", segment)
+            if descriptor:
+                return trim_person_name(descriptor.group(1))
+        founded = re.search(r"founded\\s+by\\s+([A-Z][A-Za-z.'-]+(?:\\s+[A-Z][A-Za-z.'-]+){{1,3}})", title, flags=re.I)
+        if founded:
+            founded_text = clean(founded.group(1))
+            descriptor = re.search(r"(?:Leader|Founder|Engineer|Architect|Builder)\\s+([A-Z][A-Za-z.'-]+(?:\\s+[A-Z][A-Za-z.'-]+){{1,2}})$", founded_text)
+            return trim_person_name(descriptor.group(1)) if descriptor else trim_person_name(founded_text)
+        first_part = clean(re.split(r"\\s+[-|:]\\s+", title)[0])
+        if re.fullmatch(r"[A-Z][A-Za-z.'-]+(?:\\s+[A-Z][A-Za-z.'-]+){{1,3}}", first_part):
+            return first_part
+        return ""
+
+    def infer_from_result(item):
+        title = clean(item.get("title"))
+        url = str(item.get("url") or "")
+        platform = str(item.get("platform") or "web")
+        query = clean(item.get("query"))
+        combined = clean(title + " " + query)
+        role_match = re.search(role_pattern, combined, flags=re.I)
+        role = clean(role_match.group(0)) if role_match else ""
+        company = company_from_url(url)
+        name = ""
+
+        name = person_from_title(title)
+        if not name:
+            name_pattern = r"([A-Z][A-Za-z.'-]+(?:\\s+[A-Z][A-Za-z.'-]+){{1,3}})"
+            patterns = [
+                "^" + name_pattern + r"\\s+[-,]\\s+(" + role_pattern + r")\\s+(?:at|@)\\s+([^|,]+)",
+                "^" + name_pattern + r"\\s+[-,]\\s+(" + role_pattern + r")",
+                "^" + name_pattern + r".*?(" + role_pattern + r").*?(?:at|@)\\s+([^|,]+)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, title, flags=re.I)
+                if match:
+                    candidate_name = clean(match.group(1))
+                    if candidate_name.lower().split(" ", 1)[0] in ("inside", "how", "what", "why", "lessons"):
+                        continue
+                    name = candidate_name
+                    role = clean(match.group(2)) or role
+                    if len(match.groups()) >= 3 and not company:
+                        company = clean(match.group(3))
+                    break
+        if not name:
+            name = person_from_url(url)
+        if not company:
+            company_match = re.search(r"\\bat\\s+([A-Z][A-Za-z0-9 .&-]{{2,50}})", title)
+            if company_match:
+                company = clean(re.split(r"\\s+[|,-]\\s+", company_match.group(1))[0])
+
+        source_only = any(marker in url.lower() for marker in ["/jobs/", "/job/", "/docs/", "/documentation/", "/content/", "/questions/", "/comments/"])
+        if name and role and not source_only:
+            return {{
+                "name": name[:120],
+                "company": company[:120],
+                "role": role[:120],
+                "url": url,
+                "platform": platform,
+                "target_type": "person",
+                "reason": "Search metadata identified a named founder/CTO/engineering-leader prospect.",
+                "confidence": 0.72 if company else 0.62,
+            }}
+        if company and not ("docs.github.com" in url.lower() or "github.com/github/docs" in url.lower()):
+            return {{
+                "name": company[:120],
+                "company": company[:120],
+                "role": role or "Company prospect with founder/CTO or operational signal",
+                "url": url,
+                "platform": platform,
+                "target_type": "company",
+                "reason": "Search metadata identified a company/source worth prospecting for the prompt.",
+                "confidence": 0.58 if source_only else 0.66,
+            }}
+        return None
+
     candidates = []
-    for item in results[:60]:
-        candidates.append({{
-            "name": item.get("title") or item.get("url"),
-            "company": "",
-            "role": "Founder/CTO prospect source",
-            "url": item.get("url"),
-            "platform": item.get("platform") or "web",
-            "source_url": item.get("url"),
-            "reason": "Matched a code-mode discovery query for the research prompt.",
-            "confidence": 0.55,
-        }})
+    seen = set()
+    for item in results:
+        candidate = infer_from_result(item)
+        if not candidate:
+            continue
+        key = (candidate.get("target_type"), candidate.get("name", "").lower(), candidate.get("company", "").lower(), candidate.get("url", "").lower().split("#")[0].rstrip("/"))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate["source_url"] = candidate.get("url")
+        candidate["metadata"] = {{"query": item.get("query"), "title": item.get("title"), "code_mode": "deterministic_fallback"}}
+        candidates.append(candidate)
+        if len(candidates) >= 120:
+            break
+
     candidate_ids = sdk.save_candidates(candidates)
     saved_pairs = []
     for candidate in candidates:
         candidate_id = sdk.candidate_id_for(candidate)
         if candidate_id:
             saved_pairs.append((candidate_id, candidate))
-    for candidate_id, page in zip(candidate_ids, pages):
-        sdk.save_enrichments(candidate_id, [{{
-            "query": "Browserbase Fetch",
-            "platform": page.get("platform") or "web",
-            "url": page.get("url"),
-            "title": page.get("title"),
-            "summary": (page.get("content") or "")[:500],
-            "evidence_type": "page_fact",
-            "confidence": 0.62,
-            "status": "completed",
-        }}])
+    sdk.checkpoint("initial_candidates", {{"count": len(candidates), "saved": len(saved_pairs), "sample": candidates[:20]}})
+
     scorecards = []
     targets = []
-    for index, pair in enumerate(saved_pairs[:50]):
+    for index, pair in enumerate(saved_pairs[:100]):
         candidate_id, candidate = pair
+        is_person = candidate.get("target_type") == "person"
         scorecards.append({{
             "candidate_id": candidate_id,
-            "icp_fit": 3,
+            "icp_fit": 4 if is_person else 3,
             "pain_evidence": 2,
-            "reachability": 3,
-            "call_likelihood": 2,
+            "reachability": 4 if is_person else 3,
+            "call_likelihood": 3 if is_person else 2,
             "design_partner": 3,
-            "rationale": "Fallback code-mode score; review evidence before outreach.",
+            "rationale": "Deterministic code-mode score from search metadata; enrich before high-stakes outreach.",
         }})
         targets.append({{
             "candidate_id": candidate_id,
             "display_name": candidate.get("name"),
             "url": candidate.get("url"),
             "platform": candidate.get("platform") or "web",
-            "target_type": "person",
+            "target_type": candidate.get("target_type") or "company",
             "role_or_context": candidate.get("role"),
-            "relevance_score": max(0.3, 0.75 - (index * 0.01)),
+            "relevance_score": max(0.35, (0.82 if is_person else 0.68) - (index * 0.003)),
             "why_relevant": candidate.get("reason"),
-            "evidence_summary": "Code-mode fallback discovery target. Needs review for exact fit.",
+            "evidence_summary": "Deterministic code-mode target inferred from search metadata. Needs enrichment before outreach.",
             "outreach_angle": "Ask about post-deploy operational closure if evidence confirms fit.",
             "source_urls": [candidate.get("url")],
-            "metadata": {{"code_mode": "fallback"}},
+            "metadata": {{
+                "code_mode": "deterministic_fallback",
+                "company": candidate.get("company"),
+                "role": candidate.get("role"),
+                "scores": {{"icp_fit": 4 if is_person else 3, "pain_evidence": 2, "reachability": 4 if is_person else 3, "call_likelihood": 3 if is_person else 2, "design_partner": 3}},
+            }},
         }})
     sdk.save_scorecards(scorecards)
     sdk.save_targets(targets)

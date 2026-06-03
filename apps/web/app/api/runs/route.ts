@@ -7,6 +7,7 @@ const createRunSchema = z.object({
   prompt: z.string().min(2),
   kind: z.enum(runKinds).default("research"),
   platforms: z.array(z.enum(platforms)).default(["web"]),
+  researchMode: z.enum(["code_mode_first", "code_mode_only", "normal"]).default("code_mode_first"),
   listId: z.string().optional(),
   targetIds: z.array(z.string()).optional(),
   gmailOutreach: z.object({

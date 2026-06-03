@@ -26,6 +26,7 @@ class ResearchAgent:
     def run(self, run) -> None:
         settings = self.db.settings(run)
         platforms = settings.get("platforms", ["web"])
+        research_mode = str(settings.get("researchMode") or settings.get("research_mode") or "code_mode_first")
         rerun_exclusions = self.db.rerun_exclusions(run["id"])
         rerun_guidance = self._rerun_guidance(rerun_exclusions)
         research_prompt = f"{run['prompt']}\n\n{rerun_guidance}" if rerun_guidance else run["prompt"]
@@ -46,8 +47,32 @@ class ResearchAgent:
         loaded = self.skills.load("research", platforms)
         self.db.add_step(run["id"], "plan", "Loaded browser skills", f"{len(loaded)} skill files selected for this research run.")
         saved_lists: list[str] = []
+        browserbase_platforms = [platform for platform in platforms if platform not in {"reddit", "github"}]
+        code_mode_attempted = False
 
-        if "reddit" in platforms:
+        if (
+            research_mode in {"code_mode_first", "code_mode_only"}
+            and browserbase_platforms
+            and self.config
+            and self.config.browserbase_configured
+            and not is_yc_w22_prompt(run["prompt"])
+        ):
+            self.db.add_step(
+                run["id"],
+                "plan",
+                "Code-mode first enabled",
+                "Running code-mode before Reddit, GitHub, or generic Browserbase Fetch. If it saves outreach targets, expensive fallback paths are skipped.",
+                input_json={"researchMode": research_mode, "platforms": browserbase_platforms},
+            )
+            client = BrowserbaseResearchClient(self.config, usage_recorder=lambda event: self.db.add_usage_event(run["id"], event))
+            try:
+                code_mode_attempted = True
+                if self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client, rerun_exclusions, rerun_guidance):
+                    saved_lists.append("code_mode")
+            finally:
+                client.close()
+
+        if not saved_lists and research_mode != "code_mode_only" and "reddit" in platforms:
             reddit_plan = self._plan_reddit_queries(run["id"], research_prompt)
             self.db.add_step(run["id"], "search", "Started Reddit public research", "Using Reddit public JSON endpoints for subreddit, post, comment, and user discovery.")
             browserbase_fallback = BrowserbaseResearchClient(self.config, usage_recorder=lambda event: self.db.add_usage_event(run["id"], event)) if self.config and self.config.browserbase_configured else None
@@ -74,7 +99,7 @@ class ResearchAgent:
                 output_json={"query": result.query, "subreddits": result.subreddits, "posts": len(result.posts), "comments": len(result.comments), "errors": result.errors},
             )
 
-        if "github" in platforms:
+        if not saved_lists and research_mode != "code_mode_only" and "github" in platforms:
             self.db.add_step(
                 run["id"],
                 "search",
@@ -101,8 +126,7 @@ class ResearchAgent:
                 },
             )
 
-        browserbase_platforms = [platform for platform in platforms if platform not in {"reddit", "github"}]
-        if browserbase_platforms and self.config and self.config.browserbase_configured:
+        if not saved_lists and research_mode != "code_mode_only" and browserbase_platforms and self.config and self.config.browserbase_configured:
             context_ids: dict[str, str] = {}
             for platform in browserbase_platforms:
                 context = self.db.get_ready_context(platform)
@@ -142,7 +166,7 @@ class ResearchAgent:
                         },
                     )
                 else:
-                    if self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client, rerun_exclusions, rerun_guidance):
+                    if not code_mode_attempted and self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client, rerun_exclusions, rerun_guidance):
                         saved_lists.append("code_mode")
                     else:
                         self.db.add_step(
@@ -311,10 +335,10 @@ class ResearchAgent:
                 status="skipped",
             )
 
-        before = self._target_count(run_id)
+        before = self._outreach_target_count(run_id)
         sdk = ResearchCodeModeSdk(run_id=run_id, prompt=prompt, db=self.db, browserbase=client, platforms=platforms, exclusions=exclusions)
         result = ResearchCodeModeExecutor(self.db, self.config.data_dir).execute(run_id=run_id, code=code, sdk=sdk)
-        after = self._target_count(run_id)
+        after = self._outreach_target_count(run_id)
         saved = after - before
         self.db.add_step(
             run_id,
@@ -324,10 +348,39 @@ class ResearchAgent:
             status="completed" if result.ok else "failed",
             output_json={"artifactPath": result.artifact_path, "savedTargets": saved, "error": result.error, "output": result.output},
         )
-        return result.ok and saved > 0
+        if result.ok and saved > 0:
+            return True
+
+        fallback_before = self._outreach_target_count(run_id)
+        fallback_code = fallback_code_for_prompt(prompt)
+        fallback_result = ResearchCodeModeExecutor(self.db, self.config.data_dir).execute(run_id=run_id, code=fallback_code, sdk=sdk)
+        fallback_after = self._outreach_target_count(run_id)
+        fallback_saved = fallback_after - fallback_before
+        self.db.add_step(
+            run_id,
+            "act",
+            "Executed deterministic code-mode fallback",
+            f"Fallback {'saved ' + str(fallback_saved) + ' outreach targets' if fallback_result.ok else 'failed'} after generated code-mode did not produce outreach targets.",
+            status="completed" if fallback_result.ok and fallback_saved > 0 else "failed",
+            output_json={
+                "artifactPath": fallback_result.artifact_path,
+                "savedTargets": fallback_saved,
+                "error": fallback_result.error,
+                "output": fallback_result.output,
+                "previousError": result.error,
+            },
+        )
+        return fallback_result.ok and fallback_saved > 0
 
     def _target_count(self, run_id: str) -> int:
         row = self.db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = ?", (run_id,)).fetchone()
+        return int(row["count"] if row else 0)
+
+    def _outreach_target_count(self, run_id: str) -> int:
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) AS count FROM targets WHERE run_id = ? AND target_type IN ('person', 'company', 'account', 'creator', 'user')",
+            (run_id,),
+        ).fetchone()
         return int(row["count"] if row else 0)
 
     def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages, search_results=None, rerun_guidance: str = "") -> list[BrowserbaseSynthesizedTarget]:

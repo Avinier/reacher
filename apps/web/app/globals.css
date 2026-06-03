@@ -594,6 +594,22 @@ textarea {
   width: 72px;
 }
 
+.hints-table th:nth-child(1) {
+  width: 34%;
+}
+
+.hints-table th:nth-child(2) {
+  width: 112px;
+}
+
+.hints-table th:nth-child(3) {
+  width: 84px;
+}
+
+.hints-table th:nth-child(5) {
+  width: 72px;
+}
+
 .target-name-cell {
   display: grid;
   gap: 5px;

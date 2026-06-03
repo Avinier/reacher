@@ -273,12 +273,12 @@ export function updateContext(platform: BrowserPlatform, fields: { status?: stri
   ).run(status, fields.providerContextId ?? null, fields.lastSessionId ?? null, fields.accountLabel ?? null, fields.lastError ?? null, verifiedAt ?? null, Date.now(), platform);
 }
 
-export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload; linkedinOutreach?: LinkedInOutreachPayload }) {
+export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; researchMode?: "code_mode_first" | "code_mode_only" | "normal"; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload; linkedinOutreach?: LinkedInOutreachPayload }) {
   ensureRunRerunColumns();
   const db = getDb();
   const runId = id("run");
   const now = Date.now();
-  const settings = { platforms: input.platforms, listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach, linkedinOutreach: input.linkedinOutreach };
+  const settings = { platforms: input.platforms, researchMode: input.researchMode ?? "code_mode_first", listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach, linkedinOutreach: input.linkedinOutreach };
   db.prepare(
     `INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at)
      VALUES (?, ?, 'queued', ?, ?, ?, ?)`
@@ -751,7 +751,9 @@ export function getListDetail(listId: string) {
     targets: getDb().prepare(
       `SELECT targets.*, list_items.rank, list_items.notes
        FROM list_items JOIN targets ON targets.id = list_items.target_id
-       WHERE list_items.list_id = ? ORDER BY list_items.rank`
+       WHERE list_items.list_id = ?
+         AND targets.target_type IN ('person', 'company', 'account', 'creator', 'user')
+       ORDER BY list_items.rank`
     ).all(listId) as Row[]
   };
 }
@@ -767,7 +769,7 @@ export function deleteList(listId: string) {
 
 export function listTargets(limit = 100) {
   ensureTargetOutreachColumn();
-  return getDb().prepare("SELECT * FROM targets ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
+  return getDb().prepare("SELECT * FROM targets WHERE target_type IN ('person', 'company', 'account', 'creator', 'user') ORDER BY created_at DESC LIMIT ?").all(limit) as Row[];
 }
 
 export function listTargetsByRun(limit = 50) {
@@ -777,6 +779,7 @@ export function listTargetsByRun(limit = 50) {
        SELECT runs.*
        FROM runs
        JOIN targets ON targets.run_id = runs.id
+       WHERE targets.target_type IN ('person', 'company', 'account', 'creator', 'user')
        GROUP BY runs.id
        ORDER BY runs.created_at DESC
        LIMIT ?
@@ -789,6 +792,7 @@ export function listTargetsByRun(limit = 50) {
             recent_runs.completed_at AS run_completed_at
      FROM recent_runs
      JOIN targets ON targets.run_id = recent_runs.id
+     WHERE targets.target_type IN ('person', 'company', 'account', 'creator', 'user')
      ORDER BY recent_runs.created_at DESC, COALESCE(targets.relevance_score, 0) DESC, targets.created_at DESC`
   ).all(limit) as Row[];
 }

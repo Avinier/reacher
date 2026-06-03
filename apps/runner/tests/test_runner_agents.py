@@ -15,11 +15,11 @@ from reacher_runner.browserbase.research import (
     build_research_queries,
 )
 from reacher_runner.browserbase.yc import is_yc_w22_prompt
-from reacher_runner.code_mode import ResearchCodeModeExecutor, ResearchCodeModeSdk
+from reacher_runner.code_mode import ResearchCodeModeExecutor, ResearchCodeModeSdk, fallback_code_for_prompt
 from reacher_runner.agents.research_agent import ResearchAgent
 from reacher_runner.config import Config
 from reacher_runner.db import ReacherDb
-from reacher_runner.gemini import GeminiResearchClient
+from reacher_runner.gemini import GeminiResearchClient, GeminiResult, _json_from_text
 from reacher_runner.github import (
     GitHubContactPath,
     GitHubCreatorSignal,
@@ -571,6 +571,260 @@ def run(sdk):
         assert [row["display_name"] for row in rows] == ["New Founder"]
     finally:
         db.close()
+
+
+def test_deterministic_code_mode_fallback_covers_many_targets_without_fetch(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code_many', 'research', 'claimed', 'Find founder CTO prospects with company and LinkedIn URL', '{\"platforms\":[\"web\",\"linkedin\"]}', 1, 1)"
+        )
+        db.conn.commit()
+
+        class StubBrowserbase:
+            def __init__(self):
+                self.search_calls = 0
+                self.fetch_calls = 0
+
+            def search_web(self, query: str, platform: str = "web", num_results: int = 10):
+                self.search_calls += 1
+                return [
+                    BrowserbaseSearchResult(
+                        query=query,
+                        title=f"Alex Founder {self.search_calls}-{index} - Founder CTO at Acme {self.search_calls}-{index}",
+                        url=f"https://www.linkedin.com/in/alex-founder-{self.search_calls}-{index}",
+                        platform=platform,
+                    )
+                    for index in range(num_results)
+                ]
+
+            def fetch_url(self, *args, **kwargs):
+                self.fetch_calls += 1
+                raise AssertionError("deterministic fallback should not fetch by default")
+
+            def flush_usage(self):
+                return None
+
+        browserbase = StubBrowserbase()
+        sdk = ResearchCodeModeSdk(run_id="run_code_many", prompt="Find founder CTO prospects with company and LinkedIn URL", db=db, browserbase=browserbase, platforms=["web", "linkedin"])  # type: ignore[arg-type]
+        result = ResearchCodeModeExecutor(db, tmp_path).execute(run_id="run_code_many", code=fallback_code_for_prompt("Find founder CTO prospects with company and LinkedIn URL"), sdk=sdk)
+
+        assert result.ok
+        assert result.output["targets"] == 100
+        assert browserbase.fetch_calls == 0
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM research_candidates WHERE run_id = 'run_code_many'").fetchone()["count"] >= 100
+        target_count = db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_code_many' AND target_type = 'person'").fetchone()["count"]
+        assert target_count == 100
+        first = db.conn.execute("SELECT display_name, organization, role_or_context FROM targets WHERE run_id = 'run_code_many' ORDER BY relevance_score DESC LIMIT 1").fetchone()
+        assert first["display_name"] == "Alex Founder"
+        assert str(first["organization"]).startswith("Acme ")
+        assert first["role_or_context"] == "Founder CTO"
+    finally:
+        db.close()
+
+
+def test_code_mode_fallback_parses_linkedin_title_name_and_company(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code_parse', 'research', 'claimed', 'Find founder CTO prospects with company and LinkedIn URL', '{\"platforms\":[\"web\",\"linkedin\"]}', 1, 1)"
+        )
+        db.conn.commit()
+
+        class StubBrowserbase:
+            def search_web(self, query: str, platform: str = "web", num_results: int = 10):
+                return [
+                    BrowserbaseSearchResult(query=query, title="Rishabh Sagar — Co-Founder & CTO at Superhawk.ai", url="https://rishabhsagar.com/", platform=platform),
+                    BrowserbaseSearchResult(query=query, title="Piyush Agarwal", url="https://linkedin.com/in/piyushlinkedin", platform=platform),
+                    BrowserbaseSearchResult(query=query, title="Inside T-Mat Global Technologies: The Startup Founded by Cloud & DevOps Leader Sainath Mitalakar | Indianflux", url="https://indianflux.com/inside-t-mat-global-technologies-the-startup-founded-by-cloud-devops-leader-sainath-mitalakar/", platform=platform),
+                ]
+
+            def flush_usage(self):
+                return None
+
+        sdk = ResearchCodeModeSdk(run_id="run_code_parse", prompt="Find founder CTO prospects with company and LinkedIn URL", db=db, browserbase=StubBrowserbase(), platforms=["web", "linkedin"])  # type: ignore[arg-type]
+        result = ResearchCodeModeExecutor(db, tmp_path).execute(run_id="run_code_parse", code=fallback_code_for_prompt("Find founder CTO prospects with company and LinkedIn URL"), sdk=sdk)
+
+        assert result.ok
+        rows = db.conn.execute("SELECT display_name, organization, role_or_context FROM targets WHERE run_id = 'run_code_parse' ORDER BY relevance_score DESC LIMIT 3").fetchall()
+        values = [(row["display_name"], row["organization"], row["role_or_context"]) for row in rows]
+        assert ("Rishabh Sagar", "Superhawk.ai", "Co-Founder & CTO") in values
+        assert any(name == "Piyush Agarwal" for name, _company, _role in values)
+        assert any(row["display_name"] == "Sainath Mitalakar" for row in rows)
+    finally:
+        db.close()
+
+
+def test_gemini_json_parser_repairs_invalid_python_regex_escapes() -> None:
+    parsed = _json_from_text('{"code":"def run(sdk):\\n    pattern = \\"\\\\s+\\"\\n    return {}"}')
+    assert "def run" in parsed["code"]
+    assert "\\s+" in parsed["code"]
+
+
+def test_research_agent_code_mode_runs_deterministic_fallback_after_generated_code_crash(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code_recover', 'research', 'claimed', 'Find founder CTO prospects with company and LinkedIn URL', '{\"platforms\":[\"web\",\"linkedin\"]}', 1, 1)"
+        )
+        db.conn.commit()
+
+        config = Config(
+            root=tmp_path,
+            database_path=db_path,
+            data_dir=tmp_path,
+            browserbase_api_key="bb_test",
+            browserbase_project_id="proj_test",
+            github_token=None,
+            gemini_api_key=None,
+            google_agent_platform_api_key=None,
+            poll_interval_ms=1000,
+        )
+
+        def broken_generate(self, prompt: str, platforms: list[str], rerun_guidance: str = ""):
+            return GeminiResult(ok=True, provider="test", data={"code": "def run(sdk):\n    return missing_variable"})
+
+        monkeypatch.setattr(GeminiResearchClient, "generate_code_mode_research", broken_generate)
+
+        class StubBrowserbase:
+            def __init__(self):
+                self.search_calls = 0
+
+            def search_web(self, query: str, platform: str = "web", num_results: int = 10):
+                self.search_calls += 1
+                return [
+                    BrowserbaseSearchResult(
+                        query=query,
+                        title=f"Jordan CTO {self.search_calls}-{index} - Founder CTO at RecoverCo {self.search_calls}-{index}",
+                        url=f"https://www.linkedin.com/in/jordan-cto-{self.search_calls}-{index}",
+                        platform=platform,
+                    )
+                    for index in range(num_results)
+                ]
+
+            def flush_usage(self):
+                return None
+
+        agent = ResearchAgent(db, tmp_path, tmp_path, config=config)
+        ok = agent._run_code_mode("run_code_recover", "Find founder CTO prospects with company and LinkedIn URL", ["web", "linkedin"], StubBrowserbase())  # type: ignore[arg-type]
+
+        assert ok
+        executed = db.conn.execute("SELECT status, detail FROM run_steps WHERE run_id = 'run_code_recover' AND title = 'Executed code-mode research'").fetchone()
+        assert executed["status"] == "failed"
+        fallback = db.conn.execute("SELECT status, detail FROM run_steps WHERE run_id = 'run_code_recover' AND title = 'Executed deterministic code-mode fallback'").fetchone()
+        assert fallback["status"] == "completed"
+        assert "saved" in fallback["detail"]
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_code_recover' AND target_type = 'person'").fetchone()["count"] == 100
+    finally:
+        db.close()
+
+
+def test_research_agent_code_mode_first_short_circuits_other_research_paths(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute(
+            "INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_code_first', 'research', 'claimed', 'Find founder CTO prospects', '{\"platforms\":[\"web\",\"linkedin\",\"reddit\",\"github\"],\"researchMode\":\"code_mode_first\"}', 1, 1)"
+        )
+        db.conn.commit()
+        run = db.conn.execute("SELECT * FROM runs WHERE id = 'run_code_first'").fetchone()
+        config = Config(
+            root=tmp_path,
+            database_path=db_path,
+            data_dir=tmp_path,
+            browserbase_api_key="bb_test",
+            browserbase_project_id="proj_test",
+            github_token=None,
+            gemini_api_key=None,
+            google_agent_platform_api_key=None,
+            poll_interval_ms=1000,
+        )
+
+        def fake_code_mode(self, run_id, prompt, platforms, client, exclusions=None, rerun_guidance=""):
+            self.db.save_code_mode_targets(run_id, prompt, [{
+                "display_name": "Code Mode Founder",
+                "url": "https://example.com/founder",
+                "platform": "web",
+                "target_type": "person",
+                "role_or_context": "Founder CTO",
+                "relevance_score": 0.9,
+                "why_relevant": "Code-mode target.",
+                "evidence_summary": "Code-mode saved this target.",
+                "metadata": {"company": "CodeCo"},
+            }])
+            return True
+
+        monkeypatch.setattr(ResearchAgent, "_run_code_mode", fake_code_mode)
+        agent = ResearchAgent(db, tmp_path, tmp_path, config=config)
+        agent.run(run)
+
+        step_titles = [row["title"] for row in db.conn.execute("SELECT title FROM run_steps WHERE run_id = 'run_code_first' ORDER BY \"index\"").fetchall()]
+        assert "Code-mode first enabled" in step_titles
+        assert "Started Reddit public research" not in step_titles
+        assert "Started GitHub API research" not in step_titles
+        assert "Started Browserbase deep research" not in step_titles
+        assert db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = 'run_code_first'").fetchone()["count"] == 1
+    finally:
+        db.close()
+
+
+def test_normal_browserbase_simulation_fetches_pages_while_code_mode_fallback_is_search_first(tmp_path: Path) -> None:
+    config = Config(
+        root=tmp_path,
+        database_path=tmp_path / "reacher.sqlite",
+        data_dir=tmp_path,
+        browserbase_api_key="bb_test",
+        browserbase_project_id="proj_test",
+        github_token=None,
+        gemini_api_key=None,
+        google_agent_platform_api_key=None,
+        poll_interval_ms=1000,
+    )
+    client = BrowserbaseResearchClient(config)
+    search_calls = 0
+    fetch_calls = 0
+
+    def fake_search(query: str, platform: str = "web", num_results: int = 5):
+        nonlocal search_calls
+        search_calls += 1
+        return [
+            BrowserbaseSearchResult(
+                query=query,
+                title=f"Normal Result {search_calls}-{index}",
+                url=f"https://example.com/normal-{search_calls}-{index}",
+                platform=platform,
+            )
+            for index in range(num_results)
+        ]
+
+    def fake_fetch(url: str, title: str = "", platform: str = "web"):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return BrowserbaseFetchResult(url=url, title=title, platform=platform, status_code=200, content_type="text/plain", content="Fetched page")
+
+    client.search_web = fake_search  # type: ignore[method-assign]
+    client.fetch_url = fake_fetch  # type: ignore[method-assign]
+    try:
+        result = client.research(
+            "Find founder CTO prospects with company and LinkedIn URL",
+            ["web", "linkedin"],
+            planned_queries=[{"platform": "web", "query": "Founder CTO AWS SaaS"}, {"platform": "linkedin", "query": "Founder CTO AWS site:linkedin.com/in"}],
+            max_results_per_query=10,
+            max_fetches=30,
+        )
+    finally:
+        client.close()
+
+    assert search_calls >= 2
+    assert fetch_calls == 30
+    assert len(result.fetched_pages) == 30
 
 
 def test_browserbase_aggregation_accepts_search_result_evidence(tmp_path: Path) -> None:

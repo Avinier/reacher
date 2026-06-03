@@ -29,7 +29,20 @@ def _json_from_text(text: str) -> dict[str, Any]:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.S)
     if fenced:
         stripped = fenced.group(1).strip()
-    return json.loads(stripped)
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        repaired = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", stripped)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            code_fence = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.S)
+            if code_fence and "def run" in code_fence.group(1):
+                return {"code": code_fence.group(1).strip()}
+            if "def run" in stripped:
+                start = stripped.find("def run")
+                return {"code": stripped[start:].strip().strip('"')}
+            raise
 
 
 def _looks_like_gemini_api_key(value: str | None) -> bool:

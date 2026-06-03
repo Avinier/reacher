@@ -68,7 +68,7 @@ export function RunLauncher({ compact = false, listId, outreachLists = [], outre
             listId,
             gmailOutreach: { draftMode, recipientsRaw, subject, body }
           }
-        : { prompt, kind: "research", platforms: defaultPlatforms, listId };
+        : { prompt, kind: "research", platforms: defaultPlatforms, researchMode: "code_mode_first", listId };
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },

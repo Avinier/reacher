@@ -55,6 +55,11 @@ function kindClass(kind: string) {
   return "type-chip";
 }
 
+function isOutreachTarget(target: Record<string, unknown>) {
+  const type = String(target.target_type ?? "").toLowerCase();
+  return ["person", "company", "account", "creator", "user"].includes(type);
+}
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
   const detail = getRunDetail(runId);
@@ -66,6 +71,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   const rerunRootRunId = detail.run.rerun_root_run_id ? String(detail.run.rerun_root_run_id) : "";
   const rerunIndex = Number(detail.run.rerun_index ?? 0);
   const isRerun = Boolean(rerunRootRunId && rerunIndex > 0);
+  const outreachTargets = detail.targets.filter((target) => isOutreachTarget(target));
+  const evidenceHints = detail.targets.filter((target) => !isOutreachTarget(target));
   const isGmailOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "email");
   const isLinkedInOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "linkedin");
   const gmailActions: GmailActionInput[] = detail.actions.filter((action) => action.platform === "email").map((action) => {
@@ -141,7 +148,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           </div>
           <div>
             <span className="summary-label">Targets</span>
-            <strong>{detail.targets.length}</strong>
+            <strong>{outreachTargets.length}</strong>
+          </div>
+          <div>
+            <span className="summary-label">Hints</span>
+            <strong>{evidenceHints.length}</strong>
           </div>
           <div>
             <span className="summary-label">Candidates</span>
@@ -352,11 +363,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </section>
         <section className="panel wide">
           <h2>Targets</h2>
-          <p className="muted">Rows can be outreach-ready people or supporting hints such as jobs, docs, threads, company pages, and repo/source signals. Use Kind before deciding whether to outreach or just mine the evidence.</p>
+          <p className="muted">Concrete outreach points only: people or companies. Threads, jobs, docs, and generic pages are shown separately as evidence hints.</p>
           <table className="table research-table targets-table">
             <thead><tr><th>Name / context</th><th>Kind</th><th>Platform</th><th>Outreach</th><th>Why</th><th>Score</th></tr></thead>
             <tbody>
-              {detail.targets.map((target) => {
+              {outreachTargets.map((target) => {
                 const metadata = parseJson(target.metadata_json);
                 const kind = targetKind(target);
                 const sourceUrls = Array.isArray(metadata.source_urls) ? metadata.source_urls.filter(Boolean).map(String) : [];
@@ -380,7 +391,40 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               })}
             </tbody>
           </table>
+          {outreachTargets.length === 0 && <p className="muted">No outreach-ready person or company targets saved for this run.</p>}
         </section>
+        {evidenceHints.length > 0 && (
+          <section className="panel wide">
+            <h2>Evidence hints</h2>
+            <p className="muted">Useful clues for mining pain, source pages, job signals, discussions, and follow-up research. These are not treated as outreach targets.</p>
+            <table className="table research-table hints-table">
+              <thead><tr><th>Hint / context</th><th>Kind</th><th>Platform</th><th>Why</th><th>Score</th></tr></thead>
+              <tbody>
+                {evidenceHints.map((target) => {
+                  const metadata = parseJson(target.metadata_json);
+                  const kind = targetKind(target);
+                  const sourceUrls = Array.isArray(metadata.source_urls) ? metadata.source_urls.filter(Boolean).map(String) : [];
+                  const primaryUrl = String(target.profile_url ?? sourceUrls[0] ?? "");
+                  return (
+                    <tr key={String(target.id)}>
+                      <td className="target-name-cell">
+                        <Link href={`/targets/${target.id}`} className="target-title-link">{String(target.display_name)}</Link>
+                        <span className="target-context">
+                          {[target.organization, target.role_or_context].filter(Boolean).map(String).join(" · ") || "Supporting evidence"}
+                        </span>
+                        {primaryUrl ? <a className="external-link compact-link" href={primaryUrl} target="_blank" rel="noreferrer">Open source</a> : null}
+                      </td>
+                      <td><span className={kindClass(kind)}>{kind}</span></td>
+                      <td>{String(target.platform)}</td>
+                      <td className="target-reason">{String(target.why_relevant ?? "")}</td>
+                      <td>{Number(target.relevance_score ?? 0).toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        )}
         <section className="panel wide">
           <h2>Artifacts</h2>
           {detail.artifacts.map((artifact) => (

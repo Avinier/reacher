@@ -55,6 +55,7 @@ describe("web SQLite repositories", () => {
     expect(listRuns(10).map((run) => run.id)).toContain(runId);
     const detail = getRunDetail(runId);
     expect(detail.run?.status).toBe("queued");
+    expect(detail.run?.settings_json).toContain('"researchMode":"code_mode_first"');
     expect(detail.steps).toHaveLength(1);
     expect(detail.steps[0].title).toBe("Run queued");
   });

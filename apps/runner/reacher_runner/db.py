@@ -455,7 +455,7 @@ class ReacherDb:
                 "INSERT INTO lists (id, name, description, source_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (list_id, f"Code-mode research: {prompt[:52]}", "Generated-code research with candidates, enrichment evidence, and scorecards.", run_id, now, now),
             )
-            for rank, target in enumerate(targets[:80], start=1):
+            for rank, target in enumerate(targets[:120], start=1):
                 url = str(target.get("url") or "")
                 if not url:
                     continue
