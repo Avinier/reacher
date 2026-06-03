@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, getTargetOutreachStats, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, setTargetFeedback, setTargetOutreached, upsertGmailIntegration } from "../lib/db/repositories";
+import { approveLinkedInAction, createGmailOutreachRun, createLinkedInOutreachRun, createRerun, createRun, createTargetResearchRun, deleteList, deleteRun, disconnectGmailIntegration, ensureBrowserContexts, getGmailIntegration, getRunDetail, getTargetDetail, getTargetOutreachStats, listLists, listRedditActions, listRuns, listRunsByMode, listTargetsByRun, queueRedditWriteAction, recordLinkedInOperatorSent, recordLinkedInStaged, setTargetFeedback, setTargetOutreached, upsertGmailIntegration } from "../lib/db/repositories";
 import { getDb, resetDbForTests } from "../lib/db/client";
 
 let tempDir: string;
@@ -68,6 +68,30 @@ describe("web SQLite repositories", () => {
 
     expect(deleteRun(runId)).toBe(true);
     expect(listRuns(10).some((run) => run.id === runId)).toBe(false);
+  });
+
+  it("creates reruns with preserved prompt settings and lineage indexes", () => {
+    const originalRunId = createRun({
+      kind: "research",
+      prompt: "Find infra founders",
+      platforms: ["web", "linkedin"]
+    });
+    getDb().prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run(originalRunId);
+
+    const first = createRerun(originalRunId);
+    expect(first).toMatchObject({ sourceRunId: originalRunId, rootRunId: originalRunId, rerunIndex: 1 });
+    const firstRun = getRunDetail(String(first?.runId)).run;
+    expect(firstRun?.prompt).toBe("Find infra founders");
+    expect(firstRun?.parent_run_id).toBe(originalRunId);
+    expect(firstRun?.rerun_root_run_id).toBe(originalRunId);
+    expect(JSON.parse(String(firstRun?.settings_json))).toMatchObject({
+      platforms: ["web", "linkedin"],
+      rerun: { sourceRunId: originalRunId, rootRunId: originalRunId, index: 1 }
+    });
+
+    getDb().prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run(String(first?.runId));
+    const second = createRerun(String(first?.runId));
+    expect(second).toMatchObject({ sourceRunId: first?.runId, rootRunId: originalRunId, rerunIndex: 2 });
   });
 
   it("deletes lists without deleting targets", () => {

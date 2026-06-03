@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -32,6 +33,116 @@ def _is_unusable_browserbase_page(content: str, status_code: int | None) -> bool
     if status_code in {401, 403, 429, 999}:
         return True
     return any(marker in normalized for marker in blocked_markers)
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _normalize_url(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.split("#", 1)[0].rstrip("/")
+    if text.startswith("http://"):
+        text = "https://" + text[len("http://"):]
+    if text.startswith("https://www."):
+        text = "https://" + text[len("https://www."):]
+    return text
+
+
+def _metadata(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+_PERSON_PROSPECT_TERMS = (
+    "founder",
+    "founder-cto",
+    "founder cto",
+    "technical co-founder",
+    "technical cofounder",
+    "cto",
+    "head of engineering",
+    "engineering leader",
+    "hands-on head",
+)
+
+_ROLE_TERMS = (
+    "founder",
+    "co-founder",
+    "cofounder",
+    "cto",
+    "chief technology officer",
+    "head of engineering",
+    "vp engineering",
+    "engineering leader",
+    "technical founder",
+)
+
+_SOURCE_ONLY_URL_MARKERS = (
+    "/jobs/",
+    "/job/",
+    "/careers/",
+    "/career/",
+    "/docs/",
+    "/documentation/",
+    "/tutorials/",
+    "/actions/",
+    "/content/",
+    "/questions/",
+    "/comments/",
+)
+
+_SOURCE_ONLY_HOST_MARKERS = (
+    "docs.github.com",
+    "github.com/github/docs",
+    "reddit.com/r/",
+)
+
+
+def _wants_named_people(prompt: Any) -> bool:
+    text = _normalize_text(prompt)
+    return any(term in text for term in _PERSON_PROSPECT_TERMS) and any(term in text for term in ("name", "linkedin", "outreach", "prospect", "target"))
+
+
+def _looks_like_relevant_role(value: Any) -> bool:
+    text = _normalize_text(value)
+    return any(term in text for term in _ROLE_TERMS)
+
+
+def _looks_like_person_name(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or len(text) > 80:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://", "www.", "u/", "r/")):
+        return False
+    if any(marker in lowered for marker in ("/", "\\", "{", "}", "(", ")", ".md", "github actions", "chief technology officer", "channel partnerships", "profitable startup")):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z.'-]+", text)
+    if len(words) < 2 or len(words) > 5:
+        return False
+    role_words = {"founder", "cto", "chief", "technology", "officer", "manager", "engineering", "head", "aws", "cyber", "security"}
+    return not all(word.lower() in role_words for word in words)
+
+
+def _is_source_only_url(value: Any) -> bool:
+    url = _normalize_url(value)
+    if not url:
+        return False
+    return any(marker in url for marker in _SOURCE_ONLY_HOST_MARKERS) or any(marker in url for marker in _SOURCE_ONLY_URL_MARKERS)
+
+
+def _valid_named_prospect(*, prompt: Any, display_name: Any, role: Any = None, organization: Any = None, url: Any = None, target_type: Any = None) -> tuple[bool, str]:
+    return True, ""
 
 
 class ReacherDb:
@@ -157,6 +268,16 @@ class ReacherDb:
                 """
             )
             self.conn.execute("CREATE INDEX IF NOT EXISTS research_checkpoints_run_id_idx ON research_checkpoints (run_id)")
+            self._ensure_column("runs", "parent_run_id", "text")
+            self._ensure_column("runs", "rerun_root_run_id", "text")
+            self._ensure_column("runs", "rerun_index", "integer")
+            self._ensure_column("targets", "outreached_at", "integer")
+            self._ensure_column("targets", "not_useful_at", "integer")
+
+    def _ensure_column(self, table: str, column: str, column_type: str) -> None:
+        columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def claim_next_run(self) -> sqlite3.Row | None:
         now = int(time.time() * 1000)
@@ -323,6 +444,8 @@ class ReacherDb:
         now = int(time.time() * 1000)
         list_id = new_id("list")
         target_ids: list[str] = []
+        skipped_duplicates = 0
+        skipped_invalid = 0
         with self.conn:
             self.conn.execute(
                 "UPDATE runs SET interpreted_goal = ? WHERE id = ?",
@@ -340,6 +463,24 @@ class ReacherDb:
                 source_urls = target.get("source_urls") if isinstance(target.get("source_urls"), list) else [url]
                 source_url = str(source_urls[0] or url)
                 display_name = str(target.get("display_name") or target.get("name") or url)[:200]
+                metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+                organization = target.get("company") or metadata.get("company")
+                role_or_context = target.get("role_or_context") or metadata.get("role")
+                target_type = str(target.get("target_type") or "page")
+                valid, _reason = _valid_named_prospect(
+                    prompt=prompt,
+                    display_name=display_name,
+                    role=role_or_context,
+                    organization=organization,
+                    url=url,
+                    target_type=target_type,
+                )
+                if not valid:
+                    skipped_invalid += 1
+                    continue
+                if self.target_matches_rerun_exclusion(run_id, display_name=display_name, url=url, organization=organization, source_urls=source_urls):
+                    skipped_duplicates += 1
+                    continue
                 evidence_summary = str(target.get("evidence_summary") or target.get("why_relevant") or "")
                 source_id = new_id("source")
                 self.conn.execute(
@@ -351,7 +492,6 @@ class ReacherDb:
                     relevance_score = float(target.get("relevance_score") or 0.72)
                 except (TypeError, ValueError):
                     relevance_score = 0.72
-                metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
                 metadata = {
                     **metadata,
                     "source_method": "code_mode",
@@ -366,12 +506,12 @@ class ReacherDb:
                         run_id,
                         list_id,
                         platform,
-                        str(target.get("target_type") or "page"),
+                        target_type,
                         display_name,
                         target.get("handle"),
                         url,
-                        target.get("company") or metadata.get("company"),
-                        target.get("role_or_context") or metadata.get("role"),
+                        organization,
+                        role_or_context,
                         max(0.0, min(relevance_score, 1.0)),
                         str(target.get("why_relevant") or "Code-mode research found supporting evidence."),
                         json.dumps(metadata),
@@ -407,6 +547,32 @@ class ReacherDb:
                         (target_id, run_id, candidate_id),
                     )
                 target_ids.append(target_id)
+            if skipped_duplicates:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'skipped', 'save', 'Skipped duplicate rerun targets', ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Skipped {skipped_duplicates} code-mode target(s) that matched prior rerun lineage exclusions.",
+                        json.dumps({"skippedDuplicates": skipped_duplicates, "savedTargets": len(target_ids)}),
+                        now,
+                        now,
+                    ),
+                )
+            if skipped_invalid:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'skipped', 'save', 'Skipped invalid prospect targets', ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Skipped {skipped_invalid} code-mode target(s) that were pages, jobs, docs, threads, or lacked a named founder/CTO/engineering-leader prospect.",
+                        json.dumps({"skippedInvalid": skipped_invalid, "savedTargets": len(target_ids)}),
+                        now,
+                        now,
+                    ),
+                )
         return target_ids
 
     def add_usage_event(self, run_id: str, event: UsageEvent) -> str:
@@ -485,6 +651,111 @@ class ReacherDb:
         if isinstance(raw, str):
             return json.loads(raw)
         return dict(raw)
+
+    def rerun_root_id(self, run: sqlite3.Row) -> str | None:
+        return str(run["rerun_root_run_id"] or "") or None
+
+    def lineage_run_ids(self, run_id: str) -> list[str]:
+        run = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if not run:
+            return [run_id]
+        root_id = str(run["rerun_root_run_id"] or run["id"])
+        rows = self.conn.execute(
+            "SELECT id FROM runs WHERE id = ? OR rerun_root_run_id = ? ORDER BY created_at",
+            (root_id, root_id),
+        ).fetchall()
+        ids = [str(row["id"]) for row in rows]
+        return ids or [run_id]
+
+    def rerun_exclusions(self, run_id: str) -> dict[str, Any]:
+        run = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if not run or not run["rerun_root_run_id"]:
+            return {
+                "active": False,
+                "run_ids": [],
+                "urls": [],
+                "names": [],
+                "not_useful": {"urls": [], "names": []},
+                "outreached": {"urls": [], "names": []},
+            }
+        lineage_ids = [item for item in self.lineage_run_ids(run_id) if item != run_id]
+        if not lineage_ids:
+            return {
+                "active": True,
+                "run_ids": [],
+                "urls": [],
+                "names": [],
+                "not_useful": {"urls": [], "names": []},
+                "outreached": {"urls": [], "names": []},
+            }
+        placeholders = ", ".join("?" for _ in lineage_ids)
+        rows = self.conn.execute(f"SELECT * FROM targets WHERE run_id IN ({placeholders})", tuple(lineage_ids)).fetchall()
+        urls: set[str] = set()
+        names: set[str] = set()
+        not_useful_urls: set[str] = set()
+        not_useful_names: set[str] = set()
+        outreached_urls: set[str] = set()
+        outreached_names: set[str] = set()
+        for row in rows:
+            metadata = _metadata(row["metadata_json"])
+            row_urls = [
+                row["profile_url"],
+                metadata.get("url"),
+                metadata.get("website"),
+            ]
+            source_urls = metadata.get("source_urls")
+            if isinstance(source_urls, list):
+                row_urls.extend(source_urls)
+            normalized_urls = {_normalize_url(url) for url in row_urls if _normalize_url(url)}
+            urls.update(normalized_urls)
+            name_key = self._target_name_key(row["display_name"], row["organization"] or metadata.get("company"))
+            if name_key:
+                names.add(name_key)
+            if row["not_useful_at"]:
+                not_useful_urls.update(normalized_urls)
+                if name_key:
+                    not_useful_names.add(name_key)
+            if row["outreached_at"]:
+                outreached_urls.update(normalized_urls)
+                if name_key:
+                    outreached_names.add(name_key)
+        return {
+            "active": True,
+            "run_ids": lineage_ids,
+            "urls": sorted(urls),
+            "names": sorted(names),
+            "not_useful": {"urls": sorted(not_useful_urls), "names": sorted(not_useful_names)},
+            "outreached": {"urls": sorted(outreached_urls), "names": sorted(outreached_names)},
+        }
+
+    def _target_name_key(self, display_name: Any, organization: Any = None) -> str:
+        name = _normalize_text(display_name)
+        org = _normalize_text(organization)
+        return f"{name}|{org}" if name or org else ""
+
+    def target_matches_rerun_exclusion(self, run_id: str, *, display_name: Any, url: Any = None, organization: Any = None, source_urls: list[Any] | None = None) -> bool:
+        exclusions = self.rerun_exclusions(run_id)
+        if not exclusions.get("active"):
+            return False
+        excluded_urls = set(exclusions.get("urls") or [])
+        candidate_urls = {_normalize_url(url)}
+        for source_url in source_urls or []:
+            candidate_urls.add(_normalize_url(source_url))
+        if any(candidate_url and candidate_url in excluded_urls for candidate_url in candidate_urls):
+            return True
+        name_key = self._target_name_key(display_name, organization)
+        return bool(name_key and name_key in set(exclusions.get("names") or []))
+
+    def rerun_exclusion_summary(self, run_id: str) -> str:
+        exclusions = self.rerun_exclusions(run_id)
+        if not exclusions.get("active"):
+            return ""
+        return (
+            "This is a rerun. Same prompt, but find new ground. "
+            f"Avoid {len(exclusions.get('urls') or [])} prior URLs and {len(exclusions.get('names') or [])} prior target names from lineage runs. "
+            f"Treat {len((exclusions.get('not_useful') or {}).get('names') or [])} not-useful targets as hard excludes. "
+            f"Deprioritize {len((exclusions.get('outreached') or {}).get('names') or [])} already-outreached targets unless there is clearly new evidence."
+        )
 
     def get_ready_context(self, platform: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -571,6 +842,8 @@ class ReacherDb:
                     "INSERT INTO sources (id, run_id, platform, source_type, url, title, summary, captured_at) VALUES (?, ?, 'reddit', 'post', ?, ?, ?, ?)",
                     (source_id, run_id, post.permalink, post.title, summary, now),
                 )
+                if self.target_matches_rerun_exclusion(run_id, display_name=post.title[:120] or f"Reddit post {post.id}", url=post.permalink, organization=f"r/{post.subreddit}", source_urls=[post.permalink]):
+                    continue
                 target_id = new_id("target")
                 self.conn.execute(
                     "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'reddit', 'thread', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
@@ -614,8 +887,10 @@ class ReacherDb:
                 )
 
                 if post.author:
-                    account_target_id = new_id("target")
                     profile_url = f"https://www.reddit.com/user/{post.author}/"
+                    if self.target_matches_rerun_exclusion(run_id, display_name=f"u/{post.author}", url=profile_url, organization=f"r/{post.subreddit}", source_urls=[profile_url, post.permalink]):
+                        continue
+                    account_target_id = new_id("target")
                     self.conn.execute(
                         "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'reddit', 'account', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
                         (
@@ -660,8 +935,10 @@ class ReacherDb:
                 if not comment.author:
                     continue
                 source_id = post_sources.get(comment.post_id)
-                target_id = new_id("target")
                 profile_url = f"https://www.reddit.com/user/{comment.author}/"
+                if self.target_matches_rerun_exclusion(run_id, display_name=f"u/{comment.author}", url=profile_url, organization=f"r/{comment.subreddit}", source_urls=[profile_url, comment.permalink]):
+                    continue
+                target_id = new_id("target")
                 self.conn.execute(
                     "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'reddit', 'account', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
                     (
@@ -774,6 +1051,8 @@ class ReacherDb:
                     "package_contact_paths": contact_paths,
                     "creator_contact_paths": creator_contacts,
                 }
+                if self.target_matches_rerun_exclusion(run_id, display_name=project.full_name, url=project.html_url, organization=project.owner_login, source_urls=[project.html_url, project.homepage]):
+                    continue
                 target_id = new_id("target")
                 self.conn.execute(
                     "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'github', 'project', ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
@@ -825,6 +1104,8 @@ class ReacherDb:
                 )
 
                 for creator in project.creators:
+                    if self.target_matches_rerun_exclusion(run_id, display_name=creator.name or creator.login, url=creator.html_url, organization=project.full_name, source_urls=[creator.html_url, creator.blog]):
+                        continue
                     creator_target_id = new_id("target")
                     creator_metadata = {
                         "source_method": "github_api",
@@ -878,6 +1159,8 @@ class ReacherDb:
                     )
 
                 for user in project.users:
+                    if self.target_matches_rerun_exclusion(run_id, display_name=user.owner_login or user.repo_full_name or "GitHub user signal", url=user.owner_url or user.html_url, organization=user.repo_full_name, source_urls=[user.owner_url, user.html_url]):
+                        continue
                     user_source_id = source_by_repo.get(user.repo_full_name)
                     if not user_source_id:
                         user_source_id = new_id("source")
@@ -937,6 +1220,8 @@ class ReacherDb:
         run_id = run["id"]
         list_id = new_id("list")
         source_by_url: dict[str, str] = {}
+        skipped_duplicates = 0
+        skipped_invalid = 0
 
         with self.conn:
             self.conn.execute(
@@ -976,6 +1261,21 @@ class ReacherDb:
             if result.synthesized_targets:
                 for target in result.synthesized_targets:
                     source_url = (target.source_urls[0] if target.source_urls else target.url) or target.url
+                    organization = target.metadata.get("company") if isinstance(target.metadata, dict) else None
+                    valid, _reason = _valid_named_prospect(
+                        prompt=result.prompt,
+                        display_name=target.display_name,
+                        role=target.role_or_context or (target.metadata.get("role") if isinstance(target.metadata, dict) else None),
+                        organization=organization,
+                        url=target.url,
+                        target_type=target.target_type,
+                    )
+                    if not valid:
+                        skipped_invalid += 1
+                        continue
+                    if self.target_matches_rerun_exclusion(run_id, display_name=target.display_name, url=target.url, organization=organization, source_urls=target.source_urls):
+                        skipped_duplicates += 1
+                        continue
                     source_id = source_by_url.get(source_url) or source_by_url.get(target.url) or new_id("source")
                     if source_url not in source_by_url and target.url not in source_by_url:
                         source_by_url[source_url] = source_id
@@ -991,19 +1291,20 @@ class ReacherDb:
                         **target.metadata,
                     }
                     self.conn.execute(
-                        "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
-                        (
-                            target_id,
-                            run_id,
-                            list_id,
-                            target.platform,
-                            target.target_type,
-                            target.display_name,
-                            None,
-                            target.url,
-                            target.role_or_context,
-                            target.relevance_score,
-                            target.why_relevant or "Matched the prompt through aggregated Browserbase evidence.",
+                    "INSERT INTO targets (id, run_id, list_id, platform, target_type, display_name, handle, profile_url, organization, role_or_context, relevance_score, why_relevant, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?, ?, ?)",
+                    (
+                        target_id,
+                        run_id,
+                        list_id,
+                        target.platform,
+                        target.target_type,
+                        target.display_name,
+                        None,
+                        target.url,
+                        organization,
+                        target.role_or_context,
+                        target.relevance_score,
+                        target.why_relevant or "Matched the prompt through aggregated Browserbase evidence.",
                             json.dumps(metadata),
                             now,
                             now,
@@ -1034,6 +1335,9 @@ class ReacherDb:
 
             for page in [] if result.synthesized_targets else result.fetched_pages:
                 if _is_unusable_browserbase_page(page.content, page.status_code):
+                    continue
+                if self.target_matches_rerun_exclusion(run_id, display_name=page.title[:120] or page.url, url=page.url, source_urls=[page.url]):
+                    skipped_duplicates += 1
                     continue
                 source_id = source_by_url.get(page.url) or new_id("source")
                 if page.url not in source_by_url:
@@ -1113,6 +1417,32 @@ class ReacherDb:
                 self.conn.execute(
                     "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, started_at, completed_at) VALUES (?, ?, ?, 'failed', 'fetch', 'Browserbase research warning', ?, ?, ?)",
                     (new_id("step"), run_id, self.next_step_index(run_id), error, now, now),
+                )
+            if skipped_duplicates:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'skipped', 'save', 'Skipped duplicate rerun targets', ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Skipped {skipped_duplicates} Browserbase target(s) that matched prior rerun lineage exclusions.",
+                        json.dumps({"skippedDuplicates": skipped_duplicates, "savedTargets": rank - 1}),
+                        now,
+                        now,
+                    ),
+                )
+            if skipped_invalid:
+                self.conn.execute(
+                    "INSERT INTO run_steps (id, run_id, \"index\", status, kind, title, detail, output_json, started_at, completed_at) VALUES (?, ?, ?, 'skipped', 'save', 'Skipped invalid prospect targets', ?, ?, ?, ?)",
+                    (
+                        new_id("step"),
+                        run_id,
+                        self.next_step_index(run_id),
+                        f"Skipped {skipped_invalid} Browserbase target(s) that were pages, jobs, docs, threads, or lacked a named founder/CTO/engineering-leader prospect.",
+                        json.dumps({"skippedInvalid": skipped_invalid, "savedTargets": rank - 1}),
+                        now,
+                        now,
+                    ),
                 )
 
         return list_id

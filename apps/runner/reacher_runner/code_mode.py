@@ -35,11 +35,13 @@ Useful SDK methods:
 - sdk.save_scorecards([...]): persist scorecards with 1-5 scores.
 - sdk.save_targets([...]): persist final ranked targets.
 - sdk.estimate_cost(): read current cost/tokens.
+- sdk.exclusions(): read rerun exclusion URLs/names and feedback lists; use these before fetching or saving.
 Candidate dict fields: name, company, role, url, platform, source_url, reason, confidence.
 Enrichment dict fields: query, platform, url, title, summary, evidence_type, confidence, status, error.
 Scorecard fields: candidate_id, icp_fit, pain_evidence, reachability, call_likelihood, design_partner, rationale.
 Target fields: candidate_id, display_name, url, platform, target_type, role_or_context, relevance_score, why_relevant, evidence_summary, outreach_angle, source_urls, metadata.
-For prospecting, discover broadly, dedupe before fetch, enrich likely candidates, then save 30-50 final targets.
+For named-person prospecting, save only real people as final targets: name, company, founder/CTO/Head of Engineering role, profile URL, and evidence. Job posts, docs, generic pages, Reddit threads, and search-result titles are sources only, not targets.
+For prospecting, discover broadly, dedupe before fetch, enrich likely candidates, then save 30-50 final named prospects.
 Prefer one script that performs many SDK calls programmatically over many model round trips.
 """
 
@@ -103,12 +105,14 @@ class ResearchCodeModeSdk:
         db: ReacherDb,
         browserbase: BrowserbaseResearchClient,
         platforms: list[str],
+        exclusions: dict[str, Any] | None = None,
     ):
         self.run_id = run_id
         self.prompt = prompt
         self.db = db
         self.browserbase = browserbase
         self.platforms = platforms
+        self._exclusions = exclusions or {"active": False, "urls": [], "names": [], "not_useful": {"urls": [], "names": []}, "outreached": {"urls": [], "names": []}}
         self._candidate_ids_by_key: dict[str, str] = {}
 
     def checkpoint(self, name: str, data: Any) -> None:
@@ -116,6 +120,9 @@ class ResearchCodeModeSdk:
 
     def estimate_cost(self) -> dict[str, Any]:
         return self.db.usage_summary(self.run_id)
+
+    def exclusions(self) -> dict[str, Any]:
+        return self._exclusions
 
     def search_many(self, queries: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
         normalized = []
@@ -155,6 +162,8 @@ class ResearchCodeModeSdk:
                 title = url
                 platform = "web"
             if url:
+                if self._excluded_url(url):
+                    continue
                 candidates.append({"url": url, "title": title, "platform": platform})
 
         pages: list[BrowserbaseFetchResult] = []
@@ -175,6 +184,8 @@ class ResearchCodeModeSdk:
     def save_candidates(self, candidates: list[dict[str, Any]]) -> list[str]:
         ids = []
         for candidate in candidates:
+            if self._excluded_candidate(candidate):
+                continue
             candidate_id = self.db.save_research_candidate(self.run_id, candidate)
             key = self._candidate_key(candidate)
             if key:
@@ -209,6 +220,27 @@ class ResearchCodeModeSdk:
             str(candidate.get(key) or "").strip().lower()
             for key in ("name", "company", "url")
         )
+
+    def _excluded_url(self, url: Any) -> bool:
+        normalized = str(url or "").strip().lower().split("#", 1)[0].rstrip("/")
+        if normalized.startswith("http://"):
+            normalized = "https://" + normalized[len("http://"):]
+        if normalized.startswith("https://www."):
+            normalized = "https://" + normalized[len("https://www."):]
+        return bool(normalized and normalized in set(self._exclusions.get("urls") or []))
+
+    def _excluded_candidate(self, candidate: dict[str, Any]) -> bool:
+        if self._invalid_named_prospect_candidate(candidate):
+            return True
+        if self._excluded_url(candidate.get("url")) or self._excluded_url(candidate.get("source_url")):
+            return True
+        name = str(candidate.get("name") or candidate.get("display_name") or "").strip().lower()
+        company = str(candidate.get("company") or "").strip().lower()
+        key = f"{name}|{company}" if name or company else ""
+        return bool(key and key in set(self._exclusions.get("names") or []))
+
+    def _invalid_named_prospect_candidate(self, candidate: dict[str, Any]) -> bool:
+        return False
 
 
 class ResearchCodeModeExecutor:
@@ -293,6 +325,11 @@ def run(sdk):
             "confidence": 0.55,
         }})
     candidate_ids = sdk.save_candidates(candidates)
+    saved_pairs = []
+    for candidate in candidates:
+        candidate_id = sdk.candidate_id_for(candidate)
+        if candidate_id:
+            saved_pairs.append((candidate_id, candidate))
     for candidate_id, page in zip(candidate_ids, pages):
         sdk.save_enrichments(candidate_id, [{{
             "query": "Browserbase Fetch",
@@ -306,8 +343,8 @@ def run(sdk):
         }}])
     scorecards = []
     targets = []
-    for index, candidate in enumerate(candidates[:50]):
-        candidate_id = candidate_ids[index]
+    for index, pair in enumerate(saved_pairs[:50]):
+        candidate_id, candidate = pair
         scorecards.append({{
             "candidate_id": candidate_id,
             "icp_fit": 3,
@@ -322,7 +359,7 @@ def run(sdk):
             "display_name": candidate.get("name"),
             "url": candidate.get("url"),
             "platform": candidate.get("platform") or "web",
-            "target_type": "page",
+            "target_type": "person",
             "role_or_context": candidate.get("role"),
             "relevance_score": max(0.3, 0.75 - (index * 0.01)),
             "why_relevant": candidate.get("reason"),

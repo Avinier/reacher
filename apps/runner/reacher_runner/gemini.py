@@ -67,7 +67,7 @@ class GeminiResearchClient:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
 
-    def plan_browserbase_queries(self, prompt: str, platforms: list[str]) -> GeminiResult:
+    def plan_browserbase_queries(self, prompt: str, platforms: list[str], rerun_guidance: str = "") -> GeminiResult:
         planning_prompt = (
             "Return JSON only. Break this outreach/deep-research request into concise Browserbase Search queries. "
             "Do not copy the full prompt into a query. Each query must be under 160 characters, specific, and usable "
@@ -75,7 +75,7 @@ class GeminiResearchClient:
             "queries for YC, GitHub, LinkedIn, X/Twitter, Wellfound, Work at a Startup, HN, engineering blogs, and "
             "company careers pages when relevant. Use only these platforms when assigning query.platform: "
             f"{platforms}. Schema: {{\"interpreted_goal\":\"\",\"queries\":[{{\"platform\":\"web\",\"query\":\"\",\"reason\":\"\"}}]}}. "
-            f"Research request: {prompt}"
+            f"Research request: {prompt}. {rerun_guidance}"
         )
         api_result = self._try_genai_api(planning_prompt)
         if api_result.ok:
@@ -85,14 +85,14 @@ class GeminiResearchClient:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
 
-    def generate_code_mode_research(self, prompt: str, platforms: list[str]) -> GeminiResult:
+    def generate_code_mode_research(self, prompt: str, platforms: list[str], rerun_guidance: str = "") -> GeminiResult:
         code_prompt = (
             f"{CODE_MODE_SDK_DOC}\n"
             "Generate a robust code-mode research program for this task. "
             "The script should checkpoint the plan, fan out searches, save candidates, enrich candidates, score them, "
             "and save final targets. Keep code deterministic and bounded. Return JSON only with schema: "
             "{\"code\":\"def run(sdk):\\n    ...\"}. "
-            f"Enabled platforms: {platforms}. Research request: {prompt}"
+            f"Enabled platforms: {platforms}. Research request: {prompt}. {rerun_guidance}"
         )
         api_result = self._try_genai_api(code_prompt)
         if api_result.ok:
@@ -126,6 +126,7 @@ class GeminiResearchClient:
         pages: list[dict[str, Any]],
         search_results: list[dict[str, Any]] | None = None,
         max_targets: int = 50,
+        rerun_guidance: str = "",
     ) -> GeminiResult:
         page_payload = [
             {
@@ -151,14 +152,16 @@ class GeminiResearchClient:
         ]
         aggregation_prompt = (
             "Return JSON only. Synthesize the fetched page evidence and search-result metadata into ranked outreach prospects. "
-            "Use the user's criteria. Prefer concrete people/companies over generic pages. Fetched pages are stronger evidence; "
-            "search-result titles/URLs are acceptable lower-confidence evidence when they identify a concrete person, role, or company. "
+            "Use the user's criteria. When the user asks for founders, CTOs, Heads of Engineering, or named prospects, every target must be a named person with a company and role. "
+            "Use jobs, docs, Reddit threads, GitHub docs, careers pages, YC/company pages, and generic search-result pages only as evidence/source_urls, not as final targets. "
+            "Fetched pages are stronger evidence; search-result titles/URLs are acceptable lower-confidence evidence only when they identify a concrete person, role, and company. "
             "Do not invent names, companies, roles, stack signals, or pain signals not supported by either evidence set. "
             "Include source_urls for every target. Scores must be 0.0 to 1.0. "
-            "Schema: {\"summary\":\"\",\"targets\":[{\"display_name\":\"\",\"url\":\"\",\"platform\":\"web\",\"target_type\":\"person|company|page|account\","
+            "Schema: {\"summary\":\"\",\"targets\":[{\"display_name\":\"Person Name\",\"url\":\"profile/company evidence URL\",\"platform\":\"web\",\"target_type\":\"person|account\","
             "\"role_or_context\":\"\",\"relevance_score\":0.0,\"why_relevant\":\"\",\"evidence_summary\":\"\",\"outreach_angle\":\"\",\"source_urls\":[\"\"],"
             "\"metadata\":{\"company\":\"\",\"role\":\"\",\"stack_signals\":[],\"pain_signals\":[],\"scores\":{\"icp_fit\":1,\"pain_evidence\":1,\"reachability\":1,\"call_likelihood\":1,\"design_partner\":1}}}]}. "
             f"Return up to {max_targets} targets, and prefer breadth when there are many plausible search results. "
+            f"{rerun_guidance} "
             f"User request: {prompt}. Evidence pages: {json.dumps(page_payload, ensure_ascii=False)}. "
             f"Search results: {json.dumps(search_payload, ensure_ascii=False)}"
         )

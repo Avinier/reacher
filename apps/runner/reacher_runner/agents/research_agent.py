@@ -26,18 +26,35 @@ class ResearchAgent:
     def run(self, run) -> None:
         settings = self.db.settings(run)
         platforms = settings.get("platforms", ["web"])
+        rerun_exclusions = self.db.rerun_exclusions(run["id"])
+        rerun_guidance = self._rerun_guidance(rerun_exclusions)
+        research_prompt = f"{run['prompt']}\n\n{rerun_guidance}" if rerun_guidance else run["prompt"]
+        if rerun_exclusions.get("active"):
+            self.db.add_step(
+                run["id"],
+                "plan",
+                "Loaded rerun exclusions",
+                "Rerun will avoid prior lineage targets and use feedback signals.",
+                output_json={
+                    "lineageRuns": len(rerun_exclusions.get("run_ids") or []),
+                    "excludedUrls": len(rerun_exclusions.get("urls") or []),
+                    "excludedNames": len(rerun_exclusions.get("names") or []),
+                    "notUsefulNames": len((rerun_exclusions.get("not_useful") or {}).get("names") or []),
+                    "outreachedNames": len((rerun_exclusions.get("outreached") or {}).get("names") or []),
+                },
+            )
         loaded = self.skills.load("research", platforms)
         self.db.add_step(run["id"], "plan", "Loaded browser skills", f"{len(loaded)} skill files selected for this research run.")
         saved_lists: list[str] = []
 
         if "reddit" in platforms:
-            reddit_plan = self._plan_reddit_queries(run["id"], run["prompt"])
+            reddit_plan = self._plan_reddit_queries(run["id"], research_prompt)
             self.db.add_step(run["id"], "search", "Started Reddit public research", "Using Reddit public JSON endpoints for subreddit, post, comment, and user discovery.")
             browserbase_fallback = BrowserbaseResearchClient(self.config, usage_recorder=lambda event: self.db.add_usage_event(run["id"], event)) if self.config and self.config.browserbase_configured else None
             client = RedditResearchClient(browserbase=browserbase_fallback)
             try:
                 result = client.research(
-                    run["prompt"],
+                    research_prompt,
                     planned_queries=reddit_plan.get("queries") or None,
                     planned_subreddits=reddit_plan.get("subreddits") or None,
                 )
@@ -66,7 +83,7 @@ class ResearchAgent:
             )
             client = GitHubResearchClient(self.config.github_token if self.config else None)
             try:
-                result = client.research(run["prompt"])
+                result = client.research(research_prompt)
             finally:
                 client.close()
             list_id = self.db.save_github_research(run, result)
@@ -125,7 +142,7 @@ class ResearchAgent:
                         },
                     )
                 else:
-                    if self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client):
+                    if self._run_code_mode(run["id"], run["prompt"], browserbase_platforms, client, rerun_exclusions, rerun_guidance):
                         saved_lists.append("code_mode")
                     else:
                         self.db.add_step(
@@ -135,7 +152,7 @@ class ResearchAgent:
                             "Generated-code research did not save targets; using the fixed query-planner pipeline.",
                             status="skipped",
                         )
-                        plan = self._plan_browserbase_queries(run["id"], run["prompt"], browserbase_platforms)
+                        plan = self._plan_browserbase_queries(run["id"], run["prompt"], browserbase_platforms, rerun_guidance)
                         result = client.research(
                             run["prompt"],
                             browserbase_platforms,
@@ -143,8 +160,9 @@ class ResearchAgent:
                             planned_queries=plan.get("queries"),
                             max_results_per_query=8,
                             max_fetches=30,
+                            excluded_urls=set(rerun_exclusions.get("urls") or []),
                         )
-                        synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages, result.search_results)
+                        synthesized_targets = self._aggregate_browserbase_research(run["id"], run["prompt"], result.fetched_pages, result.search_results, rerun_guidance)
                         if synthesized_targets:
                             result = replace(result, synthesized_targets=synthesized_targets)
                         list_id = self.db.save_browserbase_research(run, result)
@@ -176,6 +194,20 @@ class ResearchAgent:
             self.db.add_step(run["id"], "save", "Saved filters, targets, evidence, and list", f"Created list {list_id}.")
         self.write_exports(run["id"])
 
+    def _rerun_guidance(self, exclusions: dict) -> str:
+        if not exclusions.get("active"):
+            return ""
+        not_useful = exclusions.get("not_useful") or {}
+        outreached = exclusions.get("outreached") or {}
+        return (
+            "Rerun guidance: Same prompt, but find new ground. "
+            f"Avoid prior lineage targets. Excluded URL samples: {(exclusions.get('urls') or [])[:25]}. "
+            f"Excluded target name keys: {(exclusions.get('names') or [])[:40]}. "
+            f"Hard-exclude not-useful target keys: {(not_useful.get('names') or [])[:25]}. "
+            f"Deprioritize already-outreached target keys: {(outreached.get('names') or [])[:25]}. "
+            "Do not return exact duplicate people, companies, pages, or profile URLs from the exclusion list."
+        )
+
     def _enrich_yc_notes(self, run_id: str, yc_result):
         if not self.config:
             return yc_result
@@ -196,10 +228,10 @@ class ResearchAgent:
         ]
         return replace(yc_result, companies=companies, gemini_provider=gemini.provider)
 
-    def _plan_browserbase_queries(self, run_id: str, prompt: str, platforms: list[str]) -> dict:
+    def _plan_browserbase_queries(self, run_id: str, prompt: str, platforms: list[str], rerun_guidance: str = "") -> dict:
         if not self.config:
             return {}
-        gemini = GeminiResearchClient(self.config).plan_browserbase_queries(prompt, platforms)
+        gemini = GeminiResearchClient(self.config).plan_browserbase_queries(prompt, platforms, rerun_guidance=rerun_guidance)
         if gemini.usage_event:
             self.db.add_usage_event(run_id, gemini.usage_event)
         if not gemini.ok or not gemini.data:
@@ -253,7 +285,7 @@ class ResearchAgent:
             "interpreted_goal": interpreted_goal,
         }
 
-    def _run_code_mode(self, run_id: str, prompt: str, platforms: list[str], client: BrowserbaseResearchClient) -> bool:
+    def _run_code_mode(self, run_id: str, prompt: str, platforms: list[str], client: BrowserbaseResearchClient, exclusions: dict | None = None, rerun_guidance: str = "") -> bool:
         if not self.config:
             return False
         self.db.add_step(
@@ -262,7 +294,7 @@ class ResearchAgent:
             "Started code-mode research",
             "Generating and executing a bounded Python research program over Reacher search primitives.",
         )
-        gemini = GeminiResearchClient(self.config).generate_code_mode_research(prompt, platforms)
+        gemini = GeminiResearchClient(self.config).generate_code_mode_research(prompt, platforms, rerun_guidance=rerun_guidance)
         if gemini.usage_event:
             self.db.add_usage_event(run_id, gemini.usage_event)
         if gemini.ok and gemini.data and isinstance(gemini.data.get("code"), str):
@@ -280,7 +312,7 @@ class ResearchAgent:
             )
 
         before = self._target_count(run_id)
-        sdk = ResearchCodeModeSdk(run_id=run_id, prompt=prompt, db=self.db, browserbase=client, platforms=platforms)
+        sdk = ResearchCodeModeSdk(run_id=run_id, prompt=prompt, db=self.db, browserbase=client, platforms=platforms, exclusions=exclusions)
         result = ResearchCodeModeExecutor(self.db, self.config.data_dir).execute(run_id=run_id, code=code, sdk=sdk)
         after = self._target_count(run_id)
         saved = after - before
@@ -298,15 +330,24 @@ class ResearchAgent:
         row = self.db.conn.execute("SELECT COUNT(*) AS count FROM targets WHERE run_id = ?", (run_id,)).fetchone()
         return int(row["count"] if row else 0)
 
-    def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages, search_results=None) -> list[BrowserbaseSynthesizedTarget]:
+    def _aggregate_browserbase_research(self, run_id: str, prompt: str, pages, search_results=None, rerun_guidance: str = "") -> list[BrowserbaseSynthesizedTarget]:
         search_results = search_results or []
         if not self.config or (not pages and not search_results):
             return []
-        gemini = GeminiResearchClient(self.config).aggregate_browserbase_research(
-            prompt,
-            [page.__dict__ for page in pages],
-            [result.__dict__ for result in search_results],
-        )
+        gemini_client = GeminiResearchClient(self.config)
+        if rerun_guidance:
+            gemini = gemini_client.aggregate_browserbase_research(
+                prompt,
+                [page.__dict__ for page in pages],
+                [result.__dict__ for result in search_results],
+                rerun_guidance=rerun_guidance,
+            )
+        else:
+            gemini = gemini_client.aggregate_browserbase_research(
+                prompt,
+                [page.__dict__ for page in pages],
+                [result.__dict__ for result in search_results],
+            )
         if gemini.usage_event:
             self.db.add_usage_event(run_id, gemini.usage_event)
         if not gemini.ok or not gemini.data:

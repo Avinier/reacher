@@ -17,6 +17,16 @@ function cleanRedditUsername(username: string) {
   return username.replace(/^\/?u\//i, "");
 }
 
+function parseSettings(raw: unknown) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw as Record<string, unknown>;
+  try {
+    return JSON.parse(String(raw)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 function ensureUsageEventsTable() {
   getDb().exec(
     `CREATE TABLE IF NOT EXISTS run_usage_events (
@@ -129,6 +139,23 @@ function ensureTargetOutreachColumn() {
   for (const migrationId of migrationIds) {
     db.prepare("INSERT OR IGNORE INTO __drizzle_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, now);
   }
+}
+
+function ensureRunRerunColumns() {
+  const db = getDb();
+  const migrationId = "0005_run_rerun_lineage.sql";
+  const columns = db.prepare("PRAGMA table_info(runs)").all() as Row[];
+  db.exec("CREATE TABLE IF NOT EXISTS __drizzle_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);");
+  if (!columns.some((column) => column.name === "parent_run_id")) {
+    db.exec("ALTER TABLE runs ADD COLUMN parent_run_id text");
+  }
+  if (!columns.some((column) => column.name === "rerun_root_run_id")) {
+    db.exec("ALTER TABLE runs ADD COLUMN rerun_root_run_id text");
+  }
+  if (!columns.some((column) => column.name === "rerun_index")) {
+    db.exec("ALTER TABLE runs ADD COLUMN rerun_index integer");
+  }
+  db.prepare("INSERT OR IGNORE INTO __drizzle_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, Date.now());
 }
 
 export function ensureBrowserContexts() {
@@ -247,6 +274,7 @@ export function updateContext(platform: BrowserPlatform, fields: { status?: stri
 }
 
 export function createRun(input: { kind: RunKind; prompt: string; platforms: Platform[]; listId?: string; targetIds?: string[]; gmailOutreach?: GmailOutreachPayload; linkedinOutreach?: LinkedInOutreachPayload }) {
+  ensureRunRerunColumns();
   const db = getDb();
   const runId = id("run");
   const now = Date.now();
@@ -260,6 +288,52 @@ export function createRun(input: { kind: RunKind; prompt: string; platforms: Pla
      VALUES (?, ?, 0, 'completed', 'plan', 'Run queued', 'Waiting for the local runner to claim this job.', ?, ?)`
   ).run(id("step"), runId, now, now);
   return runId;
+}
+
+export function createRerun(sourceRunId: string) {
+  ensureRunRerunColumns();
+  const db = getDb();
+  const source = db.prepare("SELECT * FROM runs WHERE id = ?").get(sourceRunId) as Row | undefined;
+  if (!source) return undefined;
+  if (source.kind !== "research") return undefined;
+  if (!["completed", "failed"].includes(String(source.status))) return undefined;
+
+  const settings = parseSettings(source.settings_json);
+  const platforms = Array.isArray(settings.platforms) ? settings.platforms : ["web"];
+  const rootRunId = String(source.rerun_root_run_id || source.id);
+  const maxIndex = db.prepare(
+    "SELECT COALESCE(MAX(rerun_index), 0) AS max_index FROM runs WHERE rerun_root_run_id = ? OR id = ?"
+  ).get(rootRunId, rootRunId) as Row;
+  const rerunIndex = Number(maxIndex.max_index ?? 0) + 1;
+  const runId = id("run");
+  const now = Date.now();
+  const rerunSettings = {
+    ...settings,
+    platforms,
+    rerun: {
+      sourceRunId,
+      rootRunId,
+      index: rerunIndex,
+      avoidLineageTargets: true,
+      useFeedback: true
+    }
+  };
+  db.prepare(
+    `INSERT INTO runs (id, kind, status, prompt, settings_json, parent_run_id, rerun_root_run_id, rerun_index, created_at, updated_at)
+     VALUES (?, 'research', 'queued', ?, ?, ?, ?, ?, ?, ?)`
+  ).run(runId, String(source.prompt), JSON.stringify(rerunSettings), sourceRunId, rootRunId, rerunIndex, now, now);
+  db.prepare(
+    `INSERT INTO run_steps (id, run_id, "index", status, kind, title, detail, input_json, started_at, completed_at)
+     VALUES (?, ?, 0, 'completed', 'plan', 'Rerun queued', ?, ?, ?, ?)`
+  ).run(
+    id("step"),
+    runId,
+    `Rerun ${rerunIndex} queued from ${sourceRunId}; runner will avoid prior lineage targets and use feedback signals.`,
+    JSON.stringify({ sourceRunId, rootRunId, rerunIndex }),
+    now,
+    now
+  );
+  return { runId, sourceRunId, rootRunId, rerunIndex };
 }
 
 function selectedLinkedInTargets(input: { targetIds?: string[]; listIds?: string[] }) {
@@ -494,6 +568,7 @@ export function listRunsByMode(mode: "research" | "outreach", limit = 100) {
 }
 
 export function getRun(runId: string) {
+  ensureRunRerunColumns();
   return getDb().prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Row | undefined;
 }
 
@@ -508,6 +583,7 @@ export function deleteRun(runId: string) {
 export function getRunDetail(runId: string) {
   ensureUsageEventsTable();
   ensureResearchRuntimeTables();
+  ensureRunRerunColumns();
   return {
     run: getRun(runId),
     steps: getDb().prepare('SELECT * FROM run_steps WHERE run_id = ? ORDER BY "index"').all(runId) as Row[],

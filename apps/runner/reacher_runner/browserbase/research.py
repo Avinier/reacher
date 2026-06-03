@@ -202,6 +202,7 @@ class BrowserbaseResearchClient:
         synthesized_targets: list[BrowserbaseSynthesizedTarget] | None = None,
         max_results_per_query: int = 5,
         max_fetches: int = 12,
+        excluded_urls: set[str] | None = None,
     ) -> BrowserbaseDeepResearchResult:
         context_ids = context_ids or {}
         query_specs = build_research_queries(prompt, platforms, planned_queries=planned_queries)
@@ -223,10 +224,12 @@ class BrowserbaseResearchClient:
                     errors.append(f"search {spec.platform} {spec.query}: {error}")
         self.flush_usage()
 
+        excluded_urls = excluded_urls or set()
         deduped_results: list[BrowserbaseSearchResult] = []
         seen_urls: set[str] = set()
         for result in search_results:
-            if result.url in seen_urls:
+            normalized_url = self._normalize_url(result.url)
+            if result.url in seen_urls or normalized_url in excluded_urls:
                 continue
             deduped_results.append(result)
             seen_urls.add(result.url)
@@ -272,6 +275,14 @@ class BrowserbaseResearchClient:
             browser_sessions=browser_sessions,
             errors=errors,
         )
+
+    def _normalize_url(self, value: str) -> str:
+        text = str(value or "").strip().lower().split("#", 1)[0].rstrip("/")
+        if text.startswith("http://"):
+            text = "https://" + text[len("http://"):]
+        if text.startswith("https://www."):
+            text = "https://" + text[len("https://www."):]
+        return text
 
     def search_web(self, query: str, *, platform: str, num_results: int = 5) -> list[BrowserbaseSearchResult]:
         response = self.client.post("/search", json={"query": query, "numResults": max(1, min(num_results, 25))})

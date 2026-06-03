@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { DeleteButton } from "@/components/delete-button";
 import { GmailOutreachActions, GmailRowActions, type GmailActionInput } from "@/components/gmail-outreach-actions";
 import { LinkedInRowActions, type LinkedInActionInput } from "@/components/linkedin-outreach-actions";
+import { RerunButton } from "@/components/rerun-button";
 import { RunAutoRefresh } from "@/components/run-auto-refresh";
 import { TargetOutreachToggle } from "@/components/target-outreach-toggle";
 import { getRunDetail } from "@/lib/db/repositories";
@@ -30,12 +31,41 @@ function parseDraft(raw: unknown) {
   };
 }
 
+function targetKind(target: Record<string, unknown>) {
+  const type = String(target.target_type ?? "").toLowerCase();
+  const platform = String(target.platform ?? "").toLowerCase();
+  const url = String(target.profile_url ?? "");
+  if (type === "person" || type === "account" || platform === "linkedin" || platform === "x") return "Person";
+  if (type === "company") return "Company";
+  if (type === "project") return "Repo";
+  if (type === "thread" || platform === "reddit") return "Thread";
+  if (url.includes("/jobs/") || url.includes("/job/") || url.includes("workatastartup.com")) return "Job signal";
+  if (url.includes("/docs/") || url.includes("/documentation/") || url.includes("github.com/github/docs") || url.includes("/content/")) return "Docs/source";
+  if (type === "page") return "Web page";
+  return type ? humanizeToken(type) : "Hint";
+}
+
+function kindClass(kind: string) {
+  const normalized = kind.toLowerCase();
+  if (normalized === "person") return "type-chip person";
+  if (normalized === "company") return "type-chip company";
+  if (normalized === "thread") return "type-chip thread";
+  if (normalized === "job signal") return "type-chip job";
+  if (normalized === "docs/source" || normalized === "web page") return "type-chip source";
+  return "type-chip";
+}
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
   const detail = getRunDetail(runId);
   if (!detail.run) notFound();
   const status = String(detail.run.status);
   const isActive = status === "queued" || status === "claimed" || status === "running";
+  const canRerun = detail.run.kind === "research" && ["completed", "failed"].includes(status);
+  const parentRunId = detail.run.parent_run_id ? String(detail.run.parent_run_id) : "";
+  const rerunRootRunId = detail.run.rerun_root_run_id ? String(detail.run.rerun_root_run_id) : "";
+  const rerunIndex = Number(detail.run.rerun_index ?? 0);
+  const isRerun = Boolean(rerunRootRunId && rerunIndex > 0);
   const isGmailOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "email");
   const isLinkedInOutreach = detail.run.kind === "outreach_prepare" && detail.actions.some((action) => action.platform === "linkedin");
   const gmailActions: GmailActionInput[] = detail.actions.filter((action) => action.platform === "email").map((action) => {
@@ -54,17 +84,39 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   return (
     <div className="page">
       <RunAutoRefresh active={isActive} />
-      <header className="page-header">
+      <header className={isRerun ? "page-header rerun-header" : "page-header"}>
         <div>
-          <p className="eyebrow">Run Detail</p>
+          <p className="eyebrow">{isRerun ? `Rerun #${rerunIndex}` : "Run Detail"}</p>
           <h1>{humanizeToken(detail.run.kind)} run</h1>
+          {isRerun && (
+            <div className="rerun-line">
+              <span className="rerun-badge">Re-run pass {rerunIndex}</span>
+              <span>
+                Original{" "}
+                <Link href={`/runs/${rerunRootRunId}`}>{rerunRootRunId}</Link>
+                {parentRunId && parentRunId !== rerunRootRunId ? (
+                  <>
+                    {" "}
+                    · queued from <Link href={`/runs/${parentRunId}`}>{parentRunId}</Link>
+                  </>
+                ) : null}
+              </span>
+            </div>
+          )}
           <p>{String(detail.run.prompt)}</p>
           <div className="toolbar">
+            {canRerun && <RerunButton runId={runId} />}
             <DeleteButton apiPath={`/api/runs/${runId}`} confirmLabel={`Delete run ${runId}?`} redirectTo="/runs" />
           </div>
         </div>
         <span className={status === "failed" ? "status bad" : isActive ? "status active" : "status"}>{status}</span>
       </header>
+      {isRerun && (
+        <section className="notice rerun-notice">
+          <strong>Re-run mode: same prompt, new ground.</strong>
+          <p>This pass uses the original research request but avoids targets already found in this run lineage. Targets marked not useful are hard-excluded, and already-outreached targets are deprioritized.</p>
+        </section>
+      )}
       {status === "queued" && (
         <section className="notice">
           <strong>Waiting for the local runner.</strong>
@@ -257,7 +309,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           {detail.candidates.length > 0 && (
             <>
               <h3>Candidates</h3>
-              <table className="table">
+              <table className="table research-table candidates-table">
                 <thead><tr><th>Name</th><th>Company</th><th>Role</th><th>Reason</th><th>Confidence</th></tr></thead>
                 <tbody>
                   {detail.candidates.slice(0, 15).map((candidate) => (
@@ -300,19 +352,32 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </section>
         <section className="panel wide">
           <h2>Targets</h2>
-          <p className="muted">Relevance score is Reacher ranking confidence for this run. Higher means the target is earlier in the saved list and has stronger prompt-matching evidence.</p>
-          <table className="table">
-            <thead><tr><th>Name</th><th>Platform</th><th>Outreach</th><th>Why</th><th>Relevance score</th></tr></thead>
+          <p className="muted">Rows can be outreach-ready people or supporting hints such as jobs, docs, threads, company pages, and repo/source signals. Use Kind before deciding whether to outreach or just mine the evidence.</p>
+          <table className="table research-table targets-table">
+            <thead><tr><th>Name / context</th><th>Kind</th><th>Platform</th><th>Outreach</th><th>Why</th><th>Score</th></tr></thead>
             <tbody>
-              {detail.targets.map((target) => (
-                <tr key={String(target.id)}>
-                  <td><Link href={`/targets/${target.id}`}>{String(target.display_name)}</Link></td>
-                  <td>{String(target.platform)}</td>
-                  <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} notUsefulAt={target.not_useful_at} compact /></td>
-                  <td>{String(target.why_relevant ?? "")}</td>
-                  <td>{String(target.relevance_score ?? "")}</td>
-                </tr>
-              ))}
+              {detail.targets.map((target) => {
+                const metadata = parseJson(target.metadata_json);
+                const kind = targetKind(target);
+                const sourceUrls = Array.isArray(metadata.source_urls) ? metadata.source_urls.filter(Boolean).map(String) : [];
+                const primaryUrl = String(target.profile_url ?? sourceUrls[0] ?? "");
+                return (
+                  <tr key={String(target.id)}>
+                    <td className="target-name-cell">
+                      <Link href={`/targets/${target.id}`} className="target-title-link">{String(target.display_name)}</Link>
+                      <span className="target-context">
+                        {[target.organization, target.role_or_context].filter(Boolean).map(String).join(" · ") || "Evidence hint"}
+                      </span>
+                      {primaryUrl ? <a className="external-link compact-link" href={primaryUrl} target="_blank" rel="noreferrer">Open source</a> : null}
+                    </td>
+                    <td><span className={kindClass(kind)}>{kind}</span></td>
+                    <td>{String(target.platform)}</td>
+                    <td><TargetOutreachToggle targetId={String(target.id)} outreachedAt={target.outreached_at} notUsefulAt={target.not_useful_at} compact /></td>
+                    <td className="target-reason">{String(target.why_relevant ?? "")}</td>
+                    <td>{Number(target.relevance_score ?? 0).toFixed(2)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </section>

@@ -537,6 +537,42 @@ def run(sdk):
         db.close()
 
 
+def test_code_mode_sdk_exposes_exclusions_and_save_guard_skips_duplicates(tmp_path: Path) -> None:
+    db_path = tmp_path / "reacher.sqlite"
+    apply_migration(db_path)
+    db = ReacherDb(db_path)
+    try:
+        db.conn.execute("INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at) VALUES ('run_root', 'research', 'completed', 'Find', '{\"platforms\":[\"web\"]}', 1, 1)")
+        db.conn.execute("INSERT INTO targets (id, run_id, platform, target_type, display_name, profile_url, organization, status, created_at, updated_at) VALUES ('target_prior', 'run_root', 'web', 'person', 'Ada Founder', 'https://example.com/ada', 'Acme', 'saved', 1, 1)")
+        db.conn.execute("INSERT INTO runs (id, kind, status, prompt, settings_json, parent_run_id, rerun_root_run_id, rerun_index, created_at, updated_at) VALUES ('run_code_rerun', 'research', 'claimed', 'Find', '{\"platforms\":[\"web\"]}', 'run_root', 'run_root', 1, 2, 2)")
+        db.conn.commit()
+
+        class StubBrowserbase:
+            def flush_usage(self):
+                return None
+
+        code = """
+def run(sdk):
+    exclusions = sdk.exclusions()
+    sdk.checkpoint("exclusions", {"urls": len(exclusions.get("urls", []))})
+    sdk.save_targets([
+        {"display_name": "Ada Founder", "url": "https://example.com/ada", "platform": "web", "target_type": "person", "role_or_context": "Founder", "relevance_score": 0.9, "why_relevant": "Duplicate", "evidence_summary": "Duplicate", "source_urls": ["https://example.com/ada"], "metadata": {"company": "Acme"}},
+        {"display_name": "New Founder", "url": "https://example.com/new", "platform": "web", "target_type": "person", "role_or_context": "Founder", "relevance_score": 0.8, "why_relevant": "New", "evidence_summary": "New", "source_urls": ["https://example.com/new"], "metadata": {"company": "NewCo"}},
+    ])
+    return {"excluded": len(exclusions.get("urls", []))}
+"""
+        exclusions = db.rerun_exclusions("run_code_rerun")
+        sdk = ResearchCodeModeSdk(run_id="run_code_rerun", prompt="Find", db=db, browserbase=StubBrowserbase(), platforms=["web"], exclusions=exclusions)  # type: ignore[arg-type]
+        result = ResearchCodeModeExecutor(db, tmp_path).execute(run_id="run_code_rerun", code=code, sdk=sdk)
+
+        assert result.ok
+        assert result.output["excluded"] == 1
+        rows = db.conn.execute("SELECT display_name FROM targets WHERE run_id = 'run_code_rerun' ORDER BY display_name").fetchall()
+        assert [row["display_name"] for row in rows] == ["New Founder"]
+    finally:
+        db.close()
+
+
 def test_browserbase_aggregation_accepts_search_result_evidence(tmp_path: Path) -> None:
     db_path = tmp_path / "reacher.sqlite"
     apply_migration(db_path)
