@@ -11,6 +11,8 @@ import httpx
 
 
 REDDIT_BASE = "https://www.reddit.com"
+REDDIT_OAUTH_BASE = "https://oauth.reddit.com"
+REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,10 @@ class RedditResearchClient:
         self,
         user_agent: str = "Reacher local research by u/_AVINIER",
         browserbase: "RedditBrowserbaseFallback | None" = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        devvit_client_id: str | None = None,
+        devvit_refresh_token: str | None = None,
     ):
         self.client = httpx.Client(
             timeout=20,
@@ -108,6 +114,60 @@ class RedditResearchClient:
         )
         self._last_request_at: float = 0.0
         self.browserbase = browserbase
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._devvit_client_id = devvit_client_id
+        self._devvit_refresh_token = devvit_refresh_token
+        self._access_token: str | None = None
+        self._token_expires_at: float = 0.0
+
+    def _authenticate(self) -> bool:
+        # Prefer Devvit refresh token (no secret needed)
+        if self._devvit_client_id and self._devvit_refresh_token:
+            try:
+                response = self.client.post(
+                    REDDIT_TOKEN_URL,
+                    data={"grant_type": "refresh_token", "refresh_token": self._devvit_refresh_token},
+                    auth=(self._devvit_client_id, ""),
+                )
+                response.raise_for_status()
+                data = response.json()
+                self._access_token = data["access_token"]
+                self._token_expires_at = time.monotonic() + data.get("expires_in", 3600) - 60
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+        # Fallback: application-only OAuth with client_id + client_secret
+        if self._client_id and self._client_secret:
+            try:
+                response = self.client.post(
+                    REDDIT_TOKEN_URL,
+                    data={"grant_type": "client_credentials"},
+                    auth=(self._client_id, self._client_secret),
+                )
+                response.raise_for_status()
+                data = response.json()
+                self._access_token = data["access_token"]
+                self._token_expires_at = time.monotonic() + data.get("expires_in", 3600) - 60
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    def _ensure_token(self) -> bool:
+        if self._access_token and time.monotonic() < self._token_expires_at:
+            return True
+        return self._authenticate()
+
+    @property
+    def _has_auth(self) -> bool:
+        return bool((self._devvit_client_id and self._devvit_refresh_token) or (self._client_id and self._client_secret))
+
+    @property
+    def _base_url(self) -> str:
+        if self._has_auth and self._ensure_token():
+            return REDDIT_OAUTH_BASE
+        return REDDIT_BASE
 
     def close(self) -> None:
         self.client.close()
@@ -271,15 +331,16 @@ class RedditResearchClient:
 
     def _search_posts(self, query: str, subreddit: str | None, limit: int) -> list[RedditPost]:
         encoded = quote_plus(query)
+        base = self._base_url
         if subreddit:
-            url = f"{REDDIT_BASE}/r/{subreddit}/search.json?q={encoded}&restrict_sr=1&sort=relevance&t=year&limit={limit}"
+            url = f"{base}/r/{subreddit}/search.json?q={encoded}&restrict_sr=1&sort=relevance&t=year&limit={limit}"
         else:
-            url = f"{REDDIT_BASE}/search.json?q={encoded}&type=link&sort=relevance&t=year&limit={limit}"
+            url = f"{base}/search.json?q={encoded}&type=link&sort=relevance&t=year&limit={limit}"
         payload = self._get_json(url)
         return [self._post_from_child(child) for child in payload.get("data", {}).get("children", []) if child.get("kind") == "t3"]
 
     def _top_comments(self, post_id: str, limit: int) -> list[RedditComment]:
-        payload = self._get_json(f"{REDDIT_BASE}/comments/{post_id}.json?limit={limit}&sort=top")
+        payload = self._get_json(f"{self._base_url}/comments/{post_id}.json?limit={limit}&sort=top")
         if not isinstance(payload, list) or len(payload) < 2:
             return []
         children = payload[1].get("data", {}).get("children", [])
@@ -294,8 +355,11 @@ class RedditResearchClient:
 
     def _get_json(self, url: str) -> Any:
         self._throttle()
+        headers = {}
+        if self._access_token and REDDIT_OAUTH_BASE in url:
+            headers["Authorization"] = f"Bearer {self._access_token}"
         for attempt in range(self._MAX_RETRIES):
-            response = self.client.get(url)
+            response = self.client.get(url, headers=headers)
             if response.status_code == 429:
                 retry_after = float(response.headers.get("Retry-After", 2 * (attempt + 1)))
                 time.sleep(retry_after)
@@ -303,7 +367,7 @@ class RedditResearchClient:
             response.raise_for_status()
             return response.json()
         # final attempt after all retries exhausted
-        response = self.client.get(url)
+        response = self.client.get(url, headers=headers)
         response.raise_for_status()
         return response.json()
 

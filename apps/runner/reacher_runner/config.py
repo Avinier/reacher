@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +33,10 @@ class Config:
     github_token: str | None
     gemini_api_key: str | None
     google_agent_platform_api_key: str | None
+    reddit_client_id: str | None
+    reddit_client_secret: str | None
+    reddit_devvit_client_id: str | None
+    reddit_devvit_refresh_token: str | None
     poll_interval_ms: int
 
     @property
@@ -39,6 +46,31 @@ class Config:
     @property
     def gemini_configured(self) -> bool:
         return bool(self.gemini_api_key)
+
+    @property
+    def reddit_configured(self) -> bool:
+        return bool(self.reddit_client_id and self.reddit_client_secret)
+
+    @property
+    def reddit_devvit_configured(self) -> bool:
+        return bool(self.reddit_devvit_client_id and self.reddit_devvit_refresh_token)
+
+
+def _load_devvit_credentials() -> tuple[str | None, str | None]:
+    """Extract client_id and refresh_token from the Devvit CLI token file."""
+    token_path = Path.home() / ".devvit" / "token"
+    try:
+        raw = json.loads(token_path.read_text())
+        token_data = json.loads(base64.b64decode(raw["token"]))
+        refresh_token = token_data.get("refreshToken")
+        access_token = token_data.get("accessToken")
+        if not refresh_token or not access_token:
+            return None, None
+        jwt_payload = json.loads(base64.b64decode(access_token.split(".")[1] + "=="))
+        client_id = jwt_payload.get("cid")
+        return client_id, refresh_token
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 def load_config() -> Config:
@@ -54,6 +86,8 @@ def load_config() -> Config:
         os.environ.setdefault("GOOGLE_API_KEY", gemini_key)
         os.environ.setdefault("GEMINI_API_KEY", gemini_key)
 
+    devvit_client_id, devvit_refresh_token = _load_devvit_credentials()
+
     return Config(
         root=ROOT,
         database_path=database_path,
@@ -63,5 +97,9 @@ def load_config() -> Config:
         github_token=_first_env("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_TOKEN"),
         gemini_api_key=gemini_key,
         google_agent_platform_api_key=os.getenv("GOOGLE_AGENT_PLATFORM_API_KEY"),
+        reddit_client_id=os.getenv("REDDIT_CLIENT_ID"),
+        reddit_client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+        reddit_devvit_client_id=devvit_client_id,
+        reddit_devvit_refresh_token=devvit_refresh_token,
         poll_interval_ms=int(os.getenv("REACHER_RUNNER_POLL_INTERVAL_MS", "1000")),
     )

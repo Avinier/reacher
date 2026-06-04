@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from reacher_runner.artifacts.writer import ArtifactWriter
 from reacher_runner.browserbase.research import BrowserbaseResearchClient, BrowserbaseSynthesizedTarget
@@ -51,7 +52,14 @@ class ResearchAgent:
             reddit_plan = self._plan_reddit_queries(run["id"], research_prompt)
             self.db.add_step(run["id"], "search", "Started Reddit public research", "Using Reddit public JSON endpoints for subreddit, post, comment, and user discovery.")
             browserbase_fallback = BrowserbaseResearchClient(self.config, usage_recorder=lambda event: self.db.add_usage_event(run["id"], event)) if self.config and self.config.browserbase_configured else None
-            client = RedditResearchClient(browserbase=browserbase_fallback)
+            reddit_kwargs: dict[str, Any] = {"browserbase": browserbase_fallback}
+            if self.config and self.config.reddit_devvit_configured:
+                reddit_kwargs["devvit_client_id"] = self.config.reddit_devvit_client_id
+                reddit_kwargs["devvit_refresh_token"] = self.config.reddit_devvit_refresh_token
+            if self.config and self.config.reddit_configured:
+                reddit_kwargs["client_id"] = self.config.reddit_client_id
+                reddit_kwargs["client_secret"] = self.config.reddit_client_secret
+            client = RedditResearchClient(**reddit_kwargs)
             try:
                 result = client.research(
                     research_prompt,
