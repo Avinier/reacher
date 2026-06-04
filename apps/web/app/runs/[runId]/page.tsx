@@ -126,18 +126,24 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       )}
       {status === "queued" && (
         <section className="notice">
-          <strong>Waiting for the local runner.</strong>
-          <p>This job is saved in SQLite but has not been claimed yet. Start the Python runner from the repo with <code>cd apps/runner && uv run python -m reacher_runner.main</code>.</p>
+          <strong>Waiting for the local runner</strong>
+          <p>Start the runner to claim this job: <code>cd apps/runner && uv run python -m reacher_runner.main</code></p>
         </section>
       )}
       {status === "claimed" && (
         <section className="notice">
-          <strong>Runner is working.</strong>
-          <p>This page refreshes every 3 seconds while the run is active. New timeline steps, targets, usage, and artifacts will appear here.</p>
+          <strong>Research in progress</strong>
+          <p>The runner is executing this job. This page refreshes automatically as new steps, targets, and artifacts come in.</p>
+        </section>
+      )}
+      {status === "running" && (
+        <section className="notice">
+          <strong>Research in progress</strong>
+          <p>Browsing the web, extracting candidates, and scoring results. New data will appear below as the pipeline advances.</p>
         </section>
       )}
       <div className="grid">
-        <section className="panel wide summary-strip">
+        <section className={isActive ? "panel wide summary-strip active" : "panel wide summary-strip"}>
           <div>
             <span className="summary-label">Queued</span>
             <strong>{formatDateTime(detail.run.created_at)}</strong>
@@ -249,7 +255,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         )}
         <section className="panel">
           <h2>Timeline</h2>
-          <div className="timeline">
+          <div className={isActive ? "timeline active" : "timeline"}>
             {detail.steps.map((step) => (
               <div className="step" key={String(step.id)}>
                 <strong>{String(step.title)}</strong>
