@@ -155,14 +155,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             <strong>{evidenceHints.length}</strong>
           </div>
           <div>
-            <span className="summary-label">Candidates</span>
-            <strong>{detail.candidates.length}</strong>
-          </div>
-          <div>
-            <span className="summary-label">Enrichments</span>
-            <strong>{detail.enrichments.length}</strong>
-          </div>
-          <div>
             <span className="summary-label">Artifacts</span>
             <strong>{detail.artifacts.length}</strong>
           </div>
@@ -292,74 +284,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             <p key={String(filter.id)}><strong>{String(filter.platform)}</strong>: {String(filter.value)}</p>
           ))}
           {detail.filters.length === 0 && <p>No filters saved yet.</p>}
-        </section>
-        <section className="panel wide">
-          <h2>Code-mode research state</h2>
-          <div className="summary-strip compact">
-            <div><span className="summary-label">Candidates</span><strong>{detail.candidates.length}</strong></div>
-            <div><span className="summary-label">Enrichments</span><strong>{detail.enrichments.length}</strong></div>
-            <div><span className="summary-label">Scorecards</span><strong>{detail.scorecards.length}</strong></div>
-            <div><span className="summary-label">Checkpoints</span><strong>{detail.checkpoints.length}</strong></div>
-          </div>
-          {detail.checkpoints.length > 0 && (
-            <>
-              <h3>Recent checkpoints</h3>
-              <table className="table">
-                <thead><tr><th>Name</th><th>Data</th></tr></thead>
-                <tbody>
-                  {detail.checkpoints.slice(0, 5).map((checkpoint) => (
-                    <tr key={String(checkpoint.id)}>
-                      <td>{String(checkpoint.name)}</td>
-                      <td><pre className="draft-preview">{JSON.stringify(parseJson(checkpoint.data_json), null, 2).slice(0, 800)}</pre></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
-          {detail.candidates.length > 0 && (
-            <>
-              <h3>Candidates</h3>
-              <table className="table research-table candidates-table">
-                <thead><tr><th>Name</th><th>Company</th><th>Role</th><th>Reason</th><th>Confidence</th></tr></thead>
-                <tbody>
-                  {detail.candidates.slice(0, 15).map((candidate) => (
-                    <tr key={String(candidate.id)}>
-                      <td>{candidate.url ? <a href={String(candidate.url)} target="_blank" rel="noreferrer">{String(candidate.name)}</a> : String(candidate.name)}</td>
-                      <td>{String(candidate.company ?? "")}</td>
-                      <td>{String(candidate.role ?? "")}</td>
-                      <td>{String(candidate.reason ?? "")}</td>
-                      <td>{Number(candidate.confidence ?? 0).toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
-          {detail.scorecards.length > 0 && (
-            <>
-              <h3>Scorecards</h3>
-              <table className="table">
-                <thead><tr><th>Candidate</th><th>ICP</th><th>Pain</th><th>Reach</th><th>Call</th><th>Design partner</th><th>Rationale</th></tr></thead>
-                <tbody>
-                  {detail.scorecards.slice(0, 15).map((scorecard) => {
-                    const candidate = detail.candidates.find((item) => item.id === scorecard.candidate_id);
-                    return (
-                      <tr key={String(scorecard.id)}>
-                        <td>{String(candidate?.name ?? scorecard.candidate_id ?? "")}</td>
-                        <td>{String(scorecard.icp_fit ?? "")}</td>
-                        <td>{String(scorecard.pain_evidence ?? "")}</td>
-                        <td>{String(scorecard.reachability ?? "")}</td>
-                        <td>{String(scorecard.call_likelihood ?? "")}</td>
-                        <td>{String(scorecard.design_partner ?? "")}</td>
-                        <td>{String(scorecard.rationale ?? "")}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </>
-          )}
         </section>
         <section className="panel wide">
           <h2>Targets</h2>

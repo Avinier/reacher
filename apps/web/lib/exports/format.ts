@@ -58,14 +58,6 @@ export function runMarkdown(runId: string) {
     "## Targets",
     "",
     targets || "No targets saved yet.",
-    "",
-    "## Code-mode state",
-    "",
-    "| Candidate | Company | Role | Confidence |",
-    "|---|---|---|---:|",
-    detail.candidates.slice(0, 20).map((candidate) =>
-      `| ${candidate.name ?? ""} | ${candidate.company ?? ""} | ${candidate.role ?? ""} | ${candidate.confidence ?? ""} |`
-    ).join("\n") || "| - | - | - | - |"
   ].join("\n");
 }
 

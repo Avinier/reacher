@@ -278,7 +278,7 @@ export function createRun(input: { kind: RunKind; prompt: string; platforms: Pla
   const db = getDb();
   const runId = id("run");
   const now = Date.now();
-  const settings = { platforms: input.platforms, researchMode: input.researchMode ?? "code_mode_first", listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach, linkedinOutreach: input.linkedinOutreach };
+  const settings = { platforms: input.platforms, researchMode: input.researchMode ?? "normal", listId: input.listId, targetIds: input.targetIds, gmailOutreach: input.gmailOutreach, linkedinOutreach: input.linkedinOutreach };
   db.prepare(
     `INSERT INTO runs (id, kind, status, prompt, settings_json, created_at, updated_at)
      VALUES (?, ?, 'queued', ?, ?, ?, ?)`

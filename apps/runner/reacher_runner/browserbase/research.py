@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -307,7 +308,7 @@ class BrowserbaseResearchClient:
         self.record_usage(browserbase_search_event(query, len(results)))
         return results
 
-    def fetch_url(self, url: str, *, title: str, platform: str) -> BrowserbaseFetchResult:
+    def fetch_url(self, url: str, *, title: str, platform: str, max_retries: int = 3) -> BrowserbaseFetchResult:
         proxied = platform in {"x", "linkedin", "discord"}
         payload: dict[str, Any] = {
             "url": url,
@@ -315,19 +316,26 @@ class BrowserbaseResearchClient:
             "proxies": proxied,
             "format": "markdown",
         }
-        response = self.client.post("/fetch", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        result = BrowserbaseFetchResult(
-            url=url,
-            title=title,
-            platform=platform,
-            status_code=data.get("statusCode"),
-            content_type=data.get("contentType"),
-            content=str(data.get("content") or "")[:5000],
-        )
-        self.record_usage(browserbase_fetch_event(url, proxied=proxied, status_code=result.status_code))
-        return result
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
+            response = self.client.post("/fetch", json=payload)
+            if response.status_code == 429 and attempt < max_retries - 1:
+                last_error = httpx.HTTPStatusError(f"429 Too Many Requests", request=response.request, response=response)
+                time.sleep(2 ** attempt + 1)
+                continue
+            response.raise_for_status()
+            data = response.json()
+            result = BrowserbaseFetchResult(
+                url=url,
+                title=title,
+                platform=platform,
+                status_code=data.get("statusCode"),
+                content_type=data.get("contentType"),
+                content=str(data.get("content") or "")[:5000],
+            )
+            self.record_usage(browserbase_fetch_event(url, proxied=proxied, status_code=result.status_code))
+            return result
+        raise last_error or RuntimeError(f"fetch_url failed after {max_retries} retries")
 
     def create_session(self, *, platform: str, context_id: str | None) -> BrowserbaseAgentSession:
         body: dict[str, Any] = {

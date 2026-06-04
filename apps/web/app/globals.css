@@ -431,8 +431,9 @@ textarea {
 
 .outreach-toggle {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .outreach-toggle.compact .outreach-check {
@@ -442,6 +443,7 @@ textarea {
 .outreach-check {
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
 
 .outreach-check input {
@@ -587,7 +589,7 @@ textarea {
 }
 
 .targets-table th:nth-child(4) {
-  width: 158px;
+  width: 250px;
 }
 
 .targets-table th:nth-child(6) {

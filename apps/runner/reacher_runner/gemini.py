@@ -11,7 +11,6 @@ from google import genai
 from google.genai import types
 
 from reacher_runner.config import Config
-from reacher_runner.code_mode import CODE_MODE_SDK_DOC
 from reacher_runner.usage import UsageEvent, estimate_text_tokens, gemini_event
 
 
@@ -33,16 +32,7 @@ def _json_from_text(text: str) -> dict[str, Any]:
         return json.loads(stripped)
     except json.JSONDecodeError:
         repaired = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", stripped)
-        try:
-            return json.loads(repaired)
-        except json.JSONDecodeError:
-            code_fence = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.S)
-            if code_fence and "def run" in code_fence.group(1):
-                return {"code": code_fence.group(1).strip()}
-            if "def run" in stripped:
-                start = stripped.find("def run")
-                return {"code": stripped[start:].strip().strip('"')}
-            raise
+        return json.loads(repaired)
 
 
 def _looks_like_gemini_api_key(value: str | None) -> bool:
@@ -98,23 +88,6 @@ class GeminiResearchClient:
             return cli_result
         return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
 
-    def generate_code_mode_research(self, prompt: str, platforms: list[str], rerun_guidance: str = "") -> GeminiResult:
-        code_prompt = (
-            f"{CODE_MODE_SDK_DOC}\n"
-            "Generate a robust code-mode research program for this task. "
-            "The script should checkpoint the plan, fan out searches, save candidates, enrich candidates, score them, "
-            "and save final targets. Keep code deterministic and bounded. Return JSON only with schema: "
-            "{\"code\":\"def run(sdk):\\n    ...\"}. "
-            f"Enabled platforms: {platforms}. Research request: {prompt}. {rerun_guidance}"
-        )
-        api_result = self._try_genai_api(code_prompt)
-        if api_result.ok:
-            return api_result
-        cli_result = self._try_gemini_cli(code_prompt)
-        if cli_result.ok:
-            return cli_result
-        return GeminiResult(ok=False, provider="none", error=f"genai: {api_result.error}; cli: {cli_result.error}")
-
     def plan_reddit_queries(self, prompt: str) -> GeminiResult:
         planning_prompt = (
             "Return JSON only. Break this research request into concise Reddit search queries. "
@@ -138,7 +111,7 @@ class GeminiResearchClient:
         prompt: str,
         pages: list[dict[str, Any]],
         search_results: list[dict[str, Any]] | None = None,
-        max_targets: int = 50,
+        max_targets: int = 100,
         rerun_guidance: str = "",
     ) -> GeminiResult:
         page_payload = [
@@ -148,7 +121,7 @@ class GeminiResearchClient:
                 "platform": page.get("platform"),
                 "content": str(page.get("content") or "")[:900],
             }
-            for page in pages[:24]
+            for page in pages[:40]
             if page.get("url")
         ]
         search_payload = [
@@ -160,7 +133,7 @@ class GeminiResearchClient:
                 "author": result.get("author"),
                 "published_date": result.get("published_date"),
             }
-            for result in (search_results or [])[:50]
+            for result in (search_results or [])[:120]
             if result.get("url")
         ]
         aggregation_prompt = (
@@ -173,7 +146,9 @@ class GeminiResearchClient:
             "Schema: {\"summary\":\"\",\"targets\":[{\"display_name\":\"Person Name\",\"url\":\"profile/company evidence URL\",\"platform\":\"web\",\"target_type\":\"person|account\","
             "\"role_or_context\":\"\",\"relevance_score\":0.0,\"why_relevant\":\"\",\"evidence_summary\":\"\",\"outreach_angle\":\"\",\"source_urls\":[\"\"],"
             "\"metadata\":{\"company\":\"\",\"role\":\"\",\"stack_signals\":[],\"pain_signals\":[],\"scores\":{\"icp_fit\":1,\"pain_evidence\":1,\"reachability\":1,\"call_likelihood\":1,\"design_partner\":1}}}]}. "
-            f"Return up to {max_targets} targets, and prefer breadth when there are many plausible search results. "
+            f"Return as many targets as possible — aim for at least 50 and up to {max_targets}. "
+            "Maximize breadth: extract every plausible prospect from both fetched pages and search-result metadata. "
+            "Search-result titles and URLs that identify a named person with a role and company are valid lower-confidence targets even without fetched page content. "
             f"{rerun_guidance} "
             f"User request: {prompt}. Evidence pages: {json.dumps(page_payload, ensure_ascii=False)}. "
             f"Search results: {json.dumps(search_payload, ensure_ascii=False)}"
