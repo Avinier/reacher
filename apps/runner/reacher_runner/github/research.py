@@ -85,6 +85,19 @@ class GitHubResearchResult:
     errors: list[str] = field(default_factory=list)
 
 
+_BOT_PATTERNS = re.compile(
+    r"(\[bot\]$|^dependabot|^renovate|^greenkeeper|^snyk-|^imgbot|^codecov|"
+    r"^github-actions|^mergify|^netlify|^vercel|^semantic-release|^allcontributors|"
+    r"^stale|^auto-merge|^release-drafter|^pull\[bot\])",
+    re.IGNORECASE,
+)
+
+
+def _is_bot(login: str) -> bool:
+    """Return True if the login looks like a bot/automation account."""
+    return bool(_BOT_PATTERNS.search(login))
+
+
 def _compact(value: str, max_length: int = 120) -> str:
     compact = re.sub(r"\s+", " ", value).strip()
     if len(compact) <= max_length:
@@ -255,6 +268,18 @@ class GitHubResearchClient:
                 deduped_repos.append(repo)
                 seen_repos.add(full_name)
 
+        # Dedup user signals by owner_login, keeping the first (highest-signal) occurrence
+        deduped_user_signals: list[GitHubUserSignal] = []
+        seen_user_logins: set[str] = set()
+        for signal in user_signals:
+            key = (signal.owner_login or "").lower()
+            if not key or _is_bot(key):
+                continue
+            if key not in seen_user_logins:
+                deduped_user_signals.append(signal)
+                seen_user_logins.add(key)
+        user_signals = deduped_user_signals
+
         projects: list[GitHubProjectSignal] = []
         for repo in deduped_repos[:max_repositories]:
             try:
@@ -284,6 +309,8 @@ class GitHubResearchClient:
             full_name = repo_url.removeprefix(f"{GITHUB_API_URL}/repos/")
             user = item.get("user") if isinstance(item.get("user"), dict) else {}
             login = str(user.get("login") or "")
+            if _is_bot(login):
+                continue
             signals.append(
                 GitHubUserSignal(
                     repo_full_name=full_name,
@@ -304,6 +331,9 @@ class GitHubResearchClient:
                 continue
             repo = item.get("repository") if isinstance(item.get("repository"), dict) else {}
             owner = repo.get("owner") if isinstance(repo.get("owner"), dict) else {}
+            owner_login = str(owner.get("login") or "")
+            if _is_bot(owner_login):
+                continue
             signals.append(
                 GitHubUserSignal(
                     repo_full_name=str(repo.get("full_name") or ""),
@@ -359,7 +389,7 @@ class GitHubResearchClient:
             if not isinstance(contributor, dict):
                 continue
             login = str(contributor.get("login") or "")
-            if not login:
+            if not login or _is_bot(login):
                 continue
             profile = self._safe_get_json(f"/users/{login}") or contributor
             contact_paths = _contact_paths_from_profile(profile)

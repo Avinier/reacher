@@ -1016,6 +1016,8 @@ class ReacherDb:
 
             rank = 1
             source_by_repo: dict[str, str] = {}
+            seen_creator_logins: set[str] = set()
+            seen_user_logins: set[str] = set()
             for project in result.projects:
                 source_id = new_id("source")
                 source_by_repo[project.full_name] = source_id
@@ -1104,6 +1106,10 @@ class ReacherDb:
                 )
 
                 for creator in project.creators:
+                    creator_key = creator.login.lower()
+                    if creator_key in seen_creator_logins:
+                        continue
+                    seen_creator_logins.add(creator_key)
                     if self.target_matches_rerun_exclusion(run_id, display_name=creator.name or creator.login, url=creator.html_url, organization=project.full_name, source_urls=[creator.html_url, creator.blog]):
                         continue
                     creator_target_id = new_id("target")
@@ -1159,6 +1165,11 @@ class ReacherDb:
                     )
 
                 for user in project.users:
+                    user_key = (user.owner_login or "").lower()
+                    if user_key and user_key in seen_user_logins:
+                        continue
+                    if user_key:
+                        seen_user_logins.add(user_key)
                     if self.target_matches_rerun_exclusion(run_id, display_name=user.owner_login or user.repo_full_name or "GitHub user signal", url=user.owner_url or user.html_url, organization=user.repo_full_name, source_urls=[user.owner_url, user.html_url]):
                         continue
                     user_source_id = source_by_repo.get(user.repo_full_name)
